@@ -9,8 +9,14 @@
 body { margin: 0; padding: 16px; font: 14px/1.45 system-ui, -apple-system, Segoe UI, Arial, sans-serif; color: var(--ink); background: var(--bg); }
 header h1 { margin: 6px 0; font-size: 20px; }
 header p { margin: 0 0 12px; color: var(--muted); max-width: 980px; }
-#panels { display: flex; flex-wrap: wrap; gap: 16px; }
-.panel { margin: 0; flex: 1 1 480px; max-width: 640px; }
+/* The controls row is as wide as the two panels: up to 640px each side by side, stacked below 1000px */
+#panels, .controls { max-width: 1296px; }
+#panels { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+@media (max-width: 1000px) {
+  #panels, .controls { max-width: 640px; }
+  #panels { grid-template-columns: 1fr; }
+}
+.panel { margin: 0; min-width: 0; }
 .panel figcaption { font-weight: 600; margin-bottom: 4px; }
 .panel figcaption.before { color: var(--before); }
 .panel figcaption.after { color: var(--after); }
