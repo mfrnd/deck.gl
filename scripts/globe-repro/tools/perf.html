@@ -1,0 +1,223 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>globe sin/cos performance</title>
+<style>body{margin:0;background:#fff} #c{width:800px;height:600px;position:relative}</style></head>
+<body><div id="c"></div>
+<script>
+const params = new URLSearchParams(location.search);
+const version = params.get('v');
+const mode = params.get('m');
+const num = (name, fallback) => (params.has(name) ? Number(params.get(name)) : fallback);
+const post = body => fetch(`/result?v=${version}`, {method: 'POST', body: JSON.stringify(body)});
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+const median = values => { const s = [...values].sort((a, b) => a - b); return s[Math.floor(s.length / 2)]; };
+
+function renderer(gl) {
+  const info = gl.getExtension('WEBGL_debug_renderer_info');
+  return info ? gl.getParameter(info.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER);
+}
+
+// Deterministic pseudo-random lng/lat pairs
+function lngLats(count, seed = 1) {
+  const out = new Float32Array(count * 2);
+  let s = seed;
+  const rand = () => ((s = (s * 1664525 + 1013904223) >>> 0) / 4294967296);
+  for (let i = 0; i < count; i++) {
+    out[i * 2] = rand() * 360 - 180;
+    out[i * 2 + 1] = rand() * 170 - 85;
+  }
+  return out;
+}
+
+// ---------- micro benchmark: project_globe_ alone, via transform feedback ----------
+const SINCOS = `
+vec2 project_sincos_(float x) {
+  float q = floor(x * (2.0 / PI) + 0.5);
+  float r = x - q * 1.5703125 - q * 4.837512969970703125e-4 - q * 7.549789954891882e-8;
+  float r2 = r * r;
+  float s = r + r * r2 * (-1.6666654611e-1 + r2 * (8.3321608736e-3 + r2 * -1.9515295891e-4));
+  float c = 1.0 - 0.5 * r2 + r2 * r2 * (4.166664568298827e-2 + r2 * (-1.388731625493765e-3 + r2 * 2.443315711809948e-5));
+  float quadrant = q - 4.0 * floor(q * 0.25);
+  if (quadrant < 0.5) return vec2(s, c);
+  if (quadrant < 1.5) return vec2(c, -s);
+  if (quadrant < 2.5) return vec2(-s, -c);
+  return vec2(-c, s);
+}`;
+const LOOP = (call) => `
+    vec3 acc = vec3(0.0);
+    vec2 x = lnglat;
+    for (int i = 0; i < LOOPS; i++) {
+      ${call}
+      x = vec2(x.x + acc.z * 1e-6 + 0.37, x.y * 0.999 + 0.11);
+    }
+    out_position = acc;`;
+const BODIES = {
+  'baseline-loop': LOOP(`acc += vec3(x * 256.0, x.x + x.y);`),
+  'builtin-loop': LOOP(`{ float lambda = radians(x.x); float phi = radians(x.y); float cosPhi = cos(phi);
+      acc += vec3(sin(lambda) * cosPhi, -cos(lambda) * cosPhi, sin(phi)) * 256.0; }`),
+  'polynomial-loop': LOOP(`{ vec2 lambda = project_sincos_(radians(x.x)); vec2 phi = project_sincos_(radians(x.y));
+      acc += vec3(lambda.x * phi.y, -lambda.y * phi.y, phi.x) * 256.0; }`),
+  baseline: `out_position = vec3(lnglat * 256.0, lnglat.x + lnglat.y);`,
+  builtin: `
+    float lambda = radians(lnglat.x);
+    float phi = radians(lnglat.y);
+    float cosPhi = cos(phi);
+    out_position = vec3(sin(lambda) * cosPhi, -cos(lambda) * cosPhi, sin(phi)) * 256.0;`,
+  polynomial: `
+    vec2 lambda = project_sincos_(radians(lnglat.x));
+    vec2 phi = project_sincos_(radians(lnglat.y));
+    out_position = vec3(lambda.x * phi.y, -lambda.y * phi.y, phi.x) * 256.0;`
+};
+
+function microProgram(gl, body) {
+  const vs = `#version 300 es
+precision highp float;
+const float PI = 3.1415926536;
+const int LOOPS = ${num('loops', 64)};
+in vec2 lnglat;
+out vec3 out_position;
+${SINCOS}
+void main() {
+  ${body}
+  gl_Position = vec4(0.0);
+}`;
+  const fs = `#version 300 es
+precision highp float;
+out vec4 color;
+void main() { color = vec4(0.0); }`;
+  const compile = (type, src) => {
+    const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+    return s;
+  };
+  const p = gl.createProgram();
+  gl.attachShader(p, compile(gl.VERTEX_SHADER, vs));
+  gl.attachShader(p, compile(gl.FRAGMENT_SHADER, fs));
+  gl.transformFeedbackVaryings(p, ['out_position'], gl.SEPARATE_ATTRIBS);
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+  return p;
+}
+
+async function micro() {
+  const gl = document.createElement('canvas').getContext('webgl2');
+  const count = num('n', 4194304);
+  const repeats = num('repeats', 30);
+  const timer = gl.getExtension('EXT_disjoint_timer_query_webgl2');
+  const input = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, input);
+  gl.bufferData(gl.ARRAY_BUFFER, lngLats(count), gl.STATIC_DRAW);
+  const output = gl.createBuffer();
+  gl.bindBuffer(gl.TRANSFORM_FEEDBACK_BUFFER, output);
+  gl.bufferData(gl.TRANSFORM_FEEDBACK_BUFFER, count * 12, gl.DYNAMIC_COPY);
+  const tf = gl.createTransformFeedback();
+  const sink = new Float32Array(3);
+  const results = {version, mode, renderer: renderer(gl), count, timerQueries: Boolean(timer), variants: {}};
+
+  const programs = Object.fromEntries(Object.entries(BODIES).map(([name, body]) => [name, microProgram(gl, body)]));
+  const runOnce = name => {
+    const program = programs[name];
+    gl.useProgram(program);
+    const vao = gl.createVertexArray();
+    gl.bindVertexArray(vao);
+    const loc = gl.getAttribLocation(program, 'lnglat');
+    gl.bindBuffer(gl.ARRAY_BUFFER, input);
+    gl.enableVertexAttribArray(loc);
+    gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+    gl.bindTransformFeedback(gl.TRANSFORM_FEEDBACK, tf);
+    gl.bindBufferBase(gl.TRANSFORM_FEEDBACK_BUFFER, 0, output);
+    gl.enable(gl.RASTERIZER_DISCARD);
+    let query = null;
+    if (timer) { query = gl.createQuery(); gl.beginQuery(timer.TIME_ELAPSED_EXT, query); }
+    const t0 = performance.now();
+    gl.beginTransformFeedback(gl.POINTS);
+    gl.drawArrays(gl.POINTS, 0, count);
+    gl.endTransformFeedback();
+    if (timer) gl.endQuery(timer.TIME_ELAPSED_EXT);
+    gl.disable(gl.RASTERIZER_DISCARD);
+    gl.bindTransformFeedback(gl.TRANSFORM_FEEDBACK, null);
+    gl.bindBuffer(gl.TRANSFORM_FEEDBACK_BUFFER, output);
+    gl.getBufferSubData(gl.TRANSFORM_FEEDBACK_BUFFER, 0, sink); // waits for the GPU
+    const wall = performance.now() - t0;
+    gl.deleteVertexArray(vao);
+    return {wall, query};
+  };
+  // Interleave the variants so drift (clocks, thermals) affects all equally
+  const samples = Object.fromEntries(Object.keys(BODIES).map(n => [n, {wall: [], gpu: []}]));
+  for (let r = 0; r < repeats + 3; r++) {
+    for (const name of Object.keys(BODIES)) {
+      const {wall, query} = runOnce(name);
+      if (r < 3) continue; // warm-up
+      samples[name].wall.push(wall);
+      if (query) {
+        for (let t = 0; t < 200 && !gl.getQueryParameter(query, gl.QUERY_RESULT_AVAILABLE); t++) await sleep(5);
+        if (!gl.getParameter(timer.GPU_DISJOINT_EXT) && gl.getQueryParameter(query, gl.QUERY_RESULT_AVAILABLE)) {
+          samples[name].gpu.push(gl.getQueryParameter(query, gl.QUERY_RESULT) / 1e6);
+        }
+      }
+    }
+  }
+  for (const [name, s] of Object.entries(samples)) {
+    results.variants[name] = {wallMs: median(s.wall), gpuMs: s.gpu.length ? median(s.gpu) : null, samples: s.wall.length};
+  }
+  await post(results);
+}
+
+// ---------- deck.gl frame benchmark ----------
+async function deckBench() {
+  const script = document.createElement('script');
+  script.src = `deck-perf-${version}.js`;
+  await new Promise((resolve, reject) => { script.onload = resolve; script.onerror = reject; document.head.append(script); });
+  const {Deck, GlobeView, MapView, PathLayer, ScatterplotLayer} = window.deckRepro;
+  const points = num('points', 1000000);
+  const pathCount = num('paths', 20000);
+  const pathLength = num('pathLength', 50);
+  const frames = num('frames', 40);
+
+  const pointData = lngLats(points, 7);
+  const pathSeeds = lngLats(pathCount, 11);
+  const paths = [];
+  for (let i = 0; i < pathCount; i++) {
+    const [lng, lat] = [pathSeeds[i * 2], Math.max(-80, Math.min(80, pathSeeds[i * 2 + 1]))];
+    const path = [];
+    for (let k = 0; k < pathLength; k++) path.push([lng + k * 0.05, lat + Math.sin(k * 0.3) * 0.5]);
+    paths.push(path);
+  }
+  const layersFor = which => [
+    which !== 'paths' && new ScatterplotLayer({id: 'points', data: {length: points, attributes: {getPosition: {value: pointData, size: 2}}},
+      radiusUnits: 'pixels', getRadius: 1, getFillColor: [255, 0, 0]}),
+    which !== 'points' && new PathLayer({id: 'paths', data: paths, getPath: d => d, widthUnits: 'pixels', getWidth: 1, getColor: [0, 0, 255]})
+  ].filter(Boolean);
+
+  const deck = new Deck({
+    parent: document.getElementById('c'), width: 800, height: 600, views: new GlobeView({id: 'v'}),
+    viewState: {longitude: 10, latitude: 30, zoom: 1.5, pitch: 0, bearing: 0}, layers: layersFor('both'),
+    deviceProps: {type: 'webgl', webgl: {preserveDrawingBuffer: false}}
+  });
+  for (let i = 0; i < 200 && !deck.device; i++) await sleep(50);
+  const gl = deck.device.gl;
+  const results = {version, mode, renderer: renderer(gl), points, pathVertices: pathCount * pathLength, frames, scenes: {}};
+  const sync = new Uint8Array(4);
+  const measure = async (name, view, layers) => {
+    deck.setProps({views: view, layers});
+    // let layers build their buffers and shaders compile
+    for (let i = 0; i < 400 && !(deck.layerManager && deck.layerManager.getLayers().every(l => l.isLoaded)); i++) await sleep(25);
+    for (let i = 0; i < 10; i++) { deck.redraw('warmup'); gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, sync); await sleep(5); }
+    const times = [];
+    for (let i = 0; i < frames; i++) {
+      const t0 = performance.now();
+      deck.redraw('bench');
+      gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, sync); // waits until the frame is drawn
+      times.push(performance.now() - t0);
+      await sleep(2);
+    }
+    results.scenes[name] = {medianMs: median(times), minMs: Math.min(...times)};
+  };
+  await measure('globe points', new GlobeView({id: 'v'}), layersFor('points'));
+  await measure('globe paths', new GlobeView({id: 'v'}), layersFor('paths'));
+  await measure('map points (control)', new MapView({id: 'v'}), layersFor('points'));
+  await post(results);
+}
+
+(mode === 'micro' ? micro() : deckBench()).catch(e => post({version, mode, error: String(e && e.stack || e)}));
+</script>
+</body></html>

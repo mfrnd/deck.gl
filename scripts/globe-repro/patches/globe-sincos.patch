@@ -1,0 +1,89 @@
+diff --git a/modules/core/src/shaderlib/project/project.glsl.ts b/modules/core/src/shaderlib/project/project.glsl.ts
+index 3a8ca54b..3b34ca82 100644
+--- a/modules/core/src/shaderlib/project/project.glsl.ts
++++ b/modules/core/src/shaderlib/project/project.glsl.ts
+@@ -169,16 +169,32 @@ vec2 project_mercator_(vec2 lnglat) {
+   ) * WORLD_SCALE;
+ }
+ 
++// sin and cos at float32 accuracy on every renderer. Some implement the built-ins with errors up to
++// 2e-4 (SwiftShader), which moves globe positions by hundreds of meters. Reduces the angle to
++// [-PI / 4, PI / 4] by quadrant and evaluates the Cephes sinf and cosf polynomials
++vec2 project_sincos_(float x) {
++  float q = floor(x * (2.0 / PI) + 0.5);
++  // PI / 2 in three parts whose products with q are exact, so the reduction keeps full precision
++  float r = x - q * 1.5703125 - q * 4.837512969970703125e-4 - q * 7.549789954891882e-8;
++  float r2 = r * r;
++  float s = r + r * r2 * (-1.6666654611e-1 + r2 * (8.3321608736e-3 + r2 * -1.9515295891e-4));
++  float c = 1.0 - 0.5 * r2 + r2 * r2 * (4.166664568298827e-2 + r2 * (-1.388731625493765e-3 + r2 * 2.443315711809948e-5));
++  float quadrant = q - 4.0 * floor(q * 0.25);
++  if (quadrant < 0.5) return vec2(s, c);
++  if (quadrant < 1.5) return vec2(c, -s);
++  if (quadrant < 2.5) return vec2(-s, -c);
++  return vec2(-c, s);
++}
++
+ vec3 project_globe_(vec3 lnglatz) {
+-  float lambda = radians(lnglatz.x);
+-  float phi = radians(lnglatz.y);
+-  float cosPhi = cos(phi);
++  vec2 lambda = project_sincos_(radians(lnglatz.x));
++  vec2 phi = project_sincos_(radians(lnglatz.y));
+   float D = (lnglatz.z / EARTH_RADIUS + 1.0) * GLOBE_RADIUS;
+ 
+   return vec3(
+-    sin(lambda) * cosPhi,
+-    -cos(lambda) * cosPhi,
+-    sin(phi)
++    lambda.x * phi.y,
++    -lambda.y * phi.y,
++    phi.x
+   ) * D;
+ }
+ 
+diff --git a/modules/core/src/shaderlib/project/project.wgsl.ts b/modules/core/src/shaderlib/project/project.wgsl.ts
+index e6e8a349..145ee789 100644
+--- a/modules/core/src/shaderlib/project/project.wgsl.ts
++++ b/modules/core/src/shaderlib/project/project.wgsl.ts
+@@ -191,16 +191,35 @@ fn project_mercator_(lnglat: vec2<f32>) -> vec2<f32> {
+   ) * WORLD_SCALE;
+ }
+ 
++// sin and cos at f32 accuracy on every renderer, see project_sincos_ in project.glsl.ts
++fn project_sincos_(x: f32) -> vec2<f32> {
++  let q = floor(x * (2.0 / PI) + 0.5);
++  let r = x - q * 1.5703125 - q * 4.837512969970703125e-4 - q * 7.549789954891882e-8;
++  let r2 = r * r;
++  let s = r + r * r2 * (-1.6666654611e-1 + r2 * (8.3321608736e-3 + r2 * -1.9515295891e-4));
++  let c = 1.0 - 0.5 * r2 + r2 * r2 * (4.166664568298827e-2 + r2 * (-1.388731625493765e-3 + r2 * 2.443315711809948e-5));
++  let quadrant = q - 4.0 * floor(q * 0.25);
++  if (quadrant < 0.5) {
++    return vec2<f32>(s, c);
++  }
++  if (quadrant < 1.5) {
++    return vec2<f32>(c, -s);
++  }
++  if (quadrant < 2.5) {
++    return vec2<f32>(-s, -c);
++  }
++  return vec2<f32>(-c, s);
++}
++
+ // Projects lng/lat/z coordinates for a globe projection.
+ fn project_globe_(lnglatz: vec3<f32>) -> vec3<f32> {
+-  let lambda = radians(lnglatz.x);
+-  let phi = radians(lnglatz.y);
+-  let cosPhi = cos(phi);
++  let lambda = project_sincos_(radians(lnglatz.x));
++  let phi = project_sincos_(radians(lnglatz.y));
+   let D = (lnglatz.z / EARTH_RADIUS + 1.0) * GLOBE_RADIUS;
+   return vec3<f32>(
+-    sin(lambda) * cosPhi,
+-    -cos(lambda) * cosPhi,
+-    sin(phi)
++    lambda.x * phi.y,
++    -lambda.y * phi.y,
++    phi.x
+   ) * D;
+ }
+ 

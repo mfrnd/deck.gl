@@ -1,0 +1,99 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>GLSL trig accuracy</title></head>
+<body>
+<script>
+// Runs deck.gl's project_globe_ math in a vertex shader and reads the float32 results back with
+// transform feedback, so the renderer's sin/cos accuracy can be compared with exact values
+const params = new URLSearchParams(location.search);
+const version = params.get('v');
+const post = body => { const pre = document.createElement('pre'); pre.id = 'result'; pre.textContent = JSON.stringify(body); document.body.append(pre); };
+
+const VS = `#version 300 es
+precision highp float;
+in vec2 lnglat;
+out vec4 trig;
+out vec4 globe;
+out vec4 trig2;
+out vec4 globe2;
+// sin and cos from multiply-add only: reduce to [-pi/4, pi/4] by quadrant, then Cephes sinf/cosf polynomials
+vec2 sincos_(float x) {
+  float q = floor(x * 0.63661977236 + 0.5);
+  float r = (x - q * 1.5703125) - q * 4.837512969970703125e-4 - q * 7.549789954891882e-8;
+  float r2 = r * r;
+  float s = r + r * r2 * (-1.6666654611e-1 + r2 * (8.3321608736e-3 + r2 * -1.9515295891e-4));
+  float c = 1.0 - 0.5 * r2 + r2 * r2 * (4.166664568298827e-2 + r2 * (-1.388731625493765e-3 + r2 * 2.443315711809948e-5));
+  float quadrant = q - 4.0 * floor(q * 0.25);
+  if (quadrant < 0.5) return vec2(s, c);
+  if (quadrant < 1.5) return vec2(c, -s);
+  if (quadrant < 2.5) return vec2(-s, -c);
+  return vec2(-c, s);
+}
+void main() {
+  float lambda = radians(lnglat.x);
+  float phi = radians(lnglat.y);
+  float cosPhi = cos(phi);
+  trig = vec4(sin(lambda), cos(lambda), sin(phi), cosPhi);
+  globe = vec4(vec3(sin(lambda) * cosPhi, -cos(lambda) * cosPhi, sin(phi)) * 256.0, 0.0);
+  vec2 l = sincos_(lambda);
+  vec2 p = sincos_(phi);
+  trig2 = vec4(l.x, l.y, p.x, p.y);
+  globe2 = vec4(vec3(l.x * p.y, -l.y * p.y, p.x) * 256.0, 0.0);
+  gl_Position = vec4(0.0);
+}`;
+const FS = `#version 300 es
+precision highp float;
+out vec4 color;
+void main() { color = vec4(0.0); }`;
+
+function run() {
+  const gl = document.createElement('canvas').getContext('webgl2');
+  const info = gl.getExtension('WEBGL_debug_renderer_info');
+  const renderer = info ? gl.getParameter(info.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER);
+  const compile = (type, source) => {
+    const s = gl.createShader(type); gl.shaderSource(s, source); gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+    return s;
+  };
+  const program = gl.createProgram();
+  gl.attachShader(program, compile(gl.VERTEX_SHADER, VS));
+  gl.attachShader(program, compile(gl.FRAGMENT_SHADER, FS));
+  gl.transformFeedbackVaryings(program, ['trig', 'globe', 'trig2', 'globe2'], gl.INTERLEAVED_ATTRIBS);
+  gl.linkProgram(program);
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(program));
+
+  const locations = [[180, 85], [-179.99, -85], [45, 45], [0, 0], [0, 46.2], [-122.19, 0], [-122.19, 46.2], [8.5, 47.3], [13.47, 48.57], [-122.45, 37.75], [90, 30], [-45, -60]];
+  const input = new Float32Array(locations.flat());
+  const inBuffer = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, inBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER, input, gl.STATIC_DRAW);
+  const vao = gl.createVertexArray();
+  gl.bindVertexArray(vao);
+  const loc = gl.getAttribLocation(program, 'lnglat');
+  gl.enableVertexAttribArray(loc);
+  gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+
+  const outBuffer = gl.createBuffer();
+  gl.bindBuffer(gl.TRANSFORM_FEEDBACK_BUFFER, outBuffer);
+  gl.bufferData(gl.TRANSFORM_FEEDBACK_BUFFER, locations.length * 16 * 4, gl.STATIC_READ);
+  const tf = gl.createTransformFeedback();
+  gl.bindTransformFeedback(gl.TRANSFORM_FEEDBACK, tf);
+  gl.bindBufferBase(gl.TRANSFORM_FEEDBACK_BUFFER, 0, outBuffer);
+
+  gl.useProgram(program);
+  gl.enable(gl.RASTERIZER_DISCARD);
+  gl.beginTransformFeedback(gl.POINTS);
+  gl.drawArrays(gl.POINTS, 0, locations.length);
+  gl.endTransformFeedback();
+  gl.disable(gl.RASTERIZER_DISCARD);
+  gl.bindTransformFeedback(gl.TRANSFORM_FEEDBACK, null);
+
+  const out = new Float32Array(locations.length * 16);
+  gl.bindBuffer(gl.TRANSFORM_FEEDBACK_BUFFER, outBuffer);
+  gl.getBufferSubData(gl.TRANSFORM_FEEDBACK_BUFFER, 0, out);
+
+  const rows = locations.map(([lng, lat], i) => ({lng, lat, gpu: Array.from(out.slice(i * 16, i * 16 + 16))}));
+  post({version, renderer, rows});
+}
+try { run(); } catch (e) { post({version, error: String(e && e.stack || e)}); }
+</script>
+</body></html>

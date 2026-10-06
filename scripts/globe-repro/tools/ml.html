@@ -1,0 +1,102 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>deck.gl on MapLibre globe with terrain</title>
+<link rel="stylesheet" href="ml6/maplibre-gl.css">
+<style>body{margin:0;background:#fff} #c{width:480px;height:360px;position:relative}</style></head>
+<body><div id="c"></div>
+<script type="module">
+import * as maplibregl from './ml6/maplibre-gl.mjs';
+
+const params = new URLSearchParams(location.search);
+const version = params.get('v');
+const post = (path, body) => fetch(`${path}?v=${version}`, {method: 'POST', body: JSON.stringify(body)});
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+window.addEventListener('error', e => post('/log', {step: 'window error', message: String(e.message)}));
+window.addEventListener('unhandledrejection', e => post('/log', {step: 'unhandled rejection', message: String(e.reason && e.reason.stack || e.reason)}));
+
+const TERRARIUM = 'https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png';
+const CENTER = [-122.19, 46.2];
+const POINTS = [];
+for (const dy of [-0.02, 0, 0.02]) for (const dx of [-0.03, 0, 0.03]) POINTS.push([CENTER[0] + dx, CENTER[1] + dy]);
+const PINK = [255, 0, 170];
+const CYAN = [0, 200, 230];
+
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    const s = document.createElement('script'); s.src = src; s.onload = resolve; s.onerror = reject; document.head.append(s);
+  });
+}
+
+function once(map, event) {
+  return new Promise(resolve => map.once(event, () => resolve()));
+}
+
+function centroid(gl, color, tolerance) {
+  const {drawingBufferWidth: w, drawingBufferHeight: h} = gl;
+  const data = new Uint8Array(w * h * 4);
+  gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, data);
+  let sx = 0, sy = 0, n = 0;
+  for (let i = 0; i < data.length; i += 4) {
+    if (Math.abs(data[i] - color[0]) < tolerance && Math.abs(data[i + 1] - color[1]) < tolerance && Math.abs(data[i + 2] - color[2]) < tolerance) {
+      sx += (i / 4) % w; sy += h - 1 - Math.floor(i / 4 / w); n++;
+    }
+  }
+  return n ? [sx / n + 0.5, sy / n + 0.5, n] : null;
+}
+
+async function main() {
+  await loadScript(`deck-maplibre-${version}.js`);
+  const {MapLibreOverlay, ScatterplotLayer} = window.deckRepro;
+  const map = new maplibregl.Map({
+    container: 'c',
+    style: {
+      version: 8,
+      projection: {type: 'globe'},
+      sources: {
+        dem: {type: 'raster-dem', tiles: [TERRARIUM], encoding: 'terrarium', tileSize: 256, maxzoom: 14},
+        shade: {type: 'raster-dem', tiles: [TERRARIUM], encoding: 'terrarium', tileSize: 256, maxzoom: 14},
+        points: {type: 'geojson', data: {type: 'FeatureCollection', features: POINTS.map(p => ({type: 'Feature', properties: {}, geometry: {type: 'Point', coordinates: p}}))}}
+      },
+      layers: [
+        {id: 'background', type: 'background', paint: {'background-color': '#eef1f4'}},
+        {id: 'hillshade', type: 'hillshade', source: 'shade', paint: {'hillshade-exaggeration': 0.6}},
+        {id: 'circles', type: 'circle', source: 'points', paint: {'circle-radius': 8, 'circle-color': `rgb(${CYAN})`,
+          'circle-stroke-color': '#ffffff', 'circle-stroke-width': 1.5, 'circle-pitch-alignment': 'viewport'}}
+      ],
+      terrain: {source: 'dem', exaggeration: 1}
+    },
+    center: CENTER, zoom: 10, pitch: 60, bearing: 0, attributionControl: false, fadeDuration: 0, pixelRatio: 1,
+    canvasContextAttributes: {preserveDrawingBuffer: true}
+  });
+  await once(map, 'load');
+  const overlay = new MapLibreOverlay({interleaved: true, layers: []});
+  map.addControl(overlay);
+  await once(map, 'idle');
+  await post('/log', {step: 'map loaded', centerElevation: map.getCenterElevation(), relativeCheck: map.queryTerrainElevation(CENTER)});
+
+  const gl = map.getCanvas().getContext('webgl2');
+  const frames = [];
+  for (let i = 0; i <= 125; i++) {
+    const zoom = Number((10 + i * 0.02).toFixed(2));
+    map.jumpTo({zoom});
+    await once(map, 'idle');
+    // deck.gl points at the terrain height MapLibre uses at this zoom
+    const elevation = map.getCenterElevation();
+    const data = POINTS.map(p => [p[0], p[1], (map.queryTerrainElevation(p) ?? 0) + (params.get('rel') === '1' ? elevation : 0)]);
+    overlay.setProps({layers: [new ScatterplotLayer({id: 'deck-points', data, getPosition: d => d, radiusUnits: 'pixels',
+      getRadius: 4, getFillColor: PINK, parameters: {depthCompare: 'always', depthWriteEnabled: false}})]});
+    map.triggerRepaint();
+    await once(map, 'idle');
+    await sleep(50);
+    map.triggerRepaint();
+    await once(map, 'render');
+    const pink = centroid(gl, PINK, 50);
+    const cyan = centroid(gl, CYAN, 50);
+    frames.push({zoom, centerElevation: elevation, position: overlay._deck && overlay._deck.props.viewState.position,
+      pink, cyan, png: map.getCanvas().toDataURL('image/png')});
+    if (i % 25 === 0) await post('/log', {step: 'frame', zoom, pink, cyan});
+  }
+  await post('/result', {version, frames});
+}
+main().catch(e => post('/result', {version, error: String(e && e.stack || e)}));
+</script>
+</body></html>

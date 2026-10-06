@@ -1,0 +1,193 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>deck.gl globe GPU check</title>
+<style>body{margin:0;background:#fff} #c{width:480px;height:360px;position:relative}</style></head>
+<body><div id="c"></div>
+<script>
+const params = new URLSearchParams(location.search);
+const version = params.get('v');
+window.addEventListener('error', e => post('/log', {step: 'window error', message: String(e.message)}));
+window.addEventListener('unhandledrejection', e => post('/log', {step: 'unhandled rejection', message: String(e.reason && e.reason.stack || e.reason)}));
+const script = document.createElement('script');
+script.src = params.get('m') === 'terrain' ? `deck-terrain-${version}.js` : `deck-${version}.js`;
+script.onload = () => ({frames, terrain}[params.get('m')] || run)().catch(e => post('/result', {version, error: String(e && e.stack || e)}));
+document.head.append(script);
+
+function post(path, body) {
+  return fetch(`${path}?v=${version}`, {method: 'POST', body: JSON.stringify(body)});
+}
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+function renderer() {
+  const gl = document.createElement('canvas').getContext('webgl2');
+  const info = gl.getExtension('WEBGL_debug_renderer_info');
+  return info ? gl.getParameter(info.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER);
+}
+
+// Centroid of the pixels of one color, read straight from the drawing buffer (preserveDrawingBuffer)
+function centroid(deck, color) {
+  const gl = deck.device.gl;
+  const {drawingBufferWidth: w, drawingBufferHeight: h} = gl;
+  const data = new Uint8Array(w * h * 4);
+  gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, data);
+  let sx = 0, sy = 0, n = 0;
+  for (let i = 0; i < data.length; i += 4) {
+    if (data[i + 3] > 200 && Math.abs(data[i] - color[0]) < 40 && Math.abs(data[i + 1] - color[1]) < 40 && Math.abs(data[i + 2] - color[2]) < 40) {
+      sx += (i / 4) % w; sy += h - 1 - Math.floor(i / 4 / w); n++;
+    }
+  }
+  const scale = w / 480;
+  return n ? [(sx / n + 0.5) / scale, (sy / n + 0.5) / scale, n] : null;
+}
+
+// Redraw synchronously and read back until the marker appears: shaders compile in the background on a GPU
+async function settle(deck, color, tries) {
+  for (let i = 0; i < tries; i++) {
+    deck.redraw('check');
+    const c = centroid(deck, color);
+    if (c) return c;
+    await sleep(40);
+  }
+  return null;
+}
+
+// GIF frames: GlobeView without a base map, viewState.position 2,000 m up, ground grid, mast and dot at its top
+async function frames() {
+  const {Deck, GlobeView, PathLayer, ScatterplotLayer} = window.deckRepro;
+  const num = (name, fallback) => (params.has(name) ? Number(params.get(name)) : fallback);
+  const [longitude, latitude, height] = [num('lng', -122.19), num('lat', 46.2), num('h', 2000)];
+  const pitch = num('pitch', 60);
+  const [z0, z1, step] = [num('z0', 11.7), num('z1', 12.3), num('step', 0.01)];
+  const grid = [];
+  // seg: points per grid line (2 = one straight segment per line)
+  const seg = num('seg', 2);
+  const line = (from, to) => Array.from({length: seg}, (_, k) => [from[0] + (to[0] - from[0]) * k / (seg - 1), from[1] + (to[1] - from[1]) * k / (seg - 1)]);
+  for (let i = -30; i <= 30; i++) {
+    grid.push({path: line([longitude + i * 0.01, latitude - 0.3], [longitude + i * 0.01, latitude + 0.3]), major: i % 5 === 0});
+    grid.push({path: line([longitude - 0.3, latitude + i * 0.01], [longitude + 0.3, latitude + i * 0.01]), major: i % 5 === 0});
+  }
+  const layers = [
+    new PathLayer({id: 'grid', data: grid, getPath: d => d.path, widthUnits: 'pixels', getWidth: d => (d.major ? 2 : 1),
+      getColor: d => (d.major ? [110, 110, 110] : [185, 185, 185])}),
+    new PathLayer({id: 'mast', data: [0], getPath: () => [[longitude, latitude, 0], [longitude, latitude, height]],
+      widthUnits: 'pixels', getWidth: 3, getColor: [200, 40, 40], billboard: true}),
+    new ScatterplotLayer({id: 'top', data: [0], getPosition: () => [longitude, latitude, height], radiusUnits: 'pixels',
+      getRadius: 7, getFillColor: [220, 20, 60], stroked: true, getLineColor: [255, 255, 255], lineWidthUnits: 'pixels',
+      getLineWidth: 2, billboard: true, parameters: {depthCompare: 'always', depthWriteEnabled: false}})
+  ];
+  const viewState = zoom => ({longitude, latitude, zoom, pitch, bearing: 0, ...(height ? {position: [0, 0, height]} : {})});
+  const deck = new Deck({
+    parent: document.getElementById('c'), width: 480, height: 360, views: new GlobeView({id: 'v'}),
+    viewState: viewState(z0), layers, deviceProps: {type: 'webgl', webgl: {preserveDrawingBuffer: true}}
+  });
+  for (let i = 0; i < 200 && !deck.device; i++) await sleep(50);
+  await settle(deck, [220, 20, 60], 200);
+  const shots = [];
+  const count = Math.round((z1 - z0) / step);
+  for (let i = 0; i <= count; i++) {
+    const zoom = Number((z0 + i * step).toFixed(2));
+    deck.setProps({viewState: viewState(zoom)});
+    await settle(deck, [220, 20, 60], 25);
+    deck.redraw('frame');
+    shots.push({zoom: Number(zoom.toFixed(2)), png: deck.getCanvas().toDataURL('image/png')});
+  }
+  await post('/result', {version, renderer: renderer(), frames: shots});
+}
+
+// PR 1 frames: MapView over San Francisco, TerrainLayer (heights x4 as in deck.gl's render test), markers at DEM height
+async function terrain() {
+  const {Deck, MapView, ScatterplotLayer, TerrainLayer} = window.deckRepro;
+  const DECODER = {rScaler: 256 * 4, gScaler: 4, bScaler: 4 / 256, offset: -32768 * 4};
+  const markers = [
+    {name: 'Twin Peaks', position: [-122.4477, 37.7544, 1003]},
+    {name: 'Mount Davidson', position: [-122.4537, 37.7385, 1085]},
+    {name: 'Mount Sutro', position: [-122.4583, 37.7584, 1025]},
+    {name: 'Buena Vista', position: [-122.4413, 37.7682, 644]},
+    {name: 'Bernal Heights', position: [-122.4144, 37.7434, 476]}
+  ];
+  const layers = [
+    new TerrainLayer({id: 'terrain', elevationData: '/test-data/terrain-tiles/{z}/{x}/{y}.png',
+      texture: '/test-data/raster-tiles/{z}/{x}/{y}.png', elevationDecoder: DECODER, maxZoom: 12}),
+    new ScatterplotLayer({id: 'markers', data: markers, getPosition: d => d.position, radiusUnits: 'pixels', getRadius: 6,
+      getFillColor: [0, 90, 255], stroked: true, getLineColor: [255, 255, 255], lineWidthUnits: 'pixels', getLineWidth: 2,
+      billboard: true, parameters: {depthCompare: 'always'}})
+  ];
+  const viewState = zoom => ({longitude: -122.45, latitude: 37.75, zoom, pitch: 60, bearing: 0});
+  const deck = new Deck({
+    parent: document.getElementById('c'), width: 480, height: 360, views: new MapView({id: 'v'}),
+    viewState: viewState(11.7), layers, deviceProps: {type: 'webgl', webgl: {preserveDrawingBuffer: true}}
+  });
+  for (let i = 0; i < 200 && !deck.device; i++) await sleep(50);
+  const terrainLoaded = () => deck.layerManager && deck.layerManager.getLayers().filter(l => l.id === 'terrain').every(l => l.isLoaded);
+  const shots = [];
+  for (let i = 0; i <= 60; i++) {
+    const zoom = 11.7 + i / 100;
+    deck.setProps({viewState: viewState(zoom)});
+    for (let t = 0; t < 200; t++) {
+      deck.redraw('terrain');
+      if (terrainLoaded() && centroid(deck, [0, 90, 255])) break;
+      await sleep(40);
+    }
+    await sleep(60);
+    deck.redraw('frame');
+    shots.push({zoom: Number(zoom.toFixed(2)), loaded: terrainLoaded(), png: deck.getCanvas().toDataURL('image/png')});
+  }
+  await post('/result', {version, renderer: renderer(), frames: shots});
+}
+
+async function run() {
+  const {Deck, GlobeView, MapView, ScatterplotLayer} = window.deckRepro;
+  const results = {version, renderer: renderer(), dpr: devicePixelRatio, cases: []};
+  const deck = new Deck({
+    parent: document.getElementById('c'), width: 480, height: 360, views: new MapView({id: 'v'}),
+    viewState: {longitude: 0, latitude: 0, zoom: 11.9, pitch: 0, bearing: 0},
+    layers: [new ScatterplotLayer({id: 'm', data: [0], getPosition: () => [0, 0, 0], getFillColor: [255, 0, 0], radiusUnits: 'pixels', getRadius: 20})],
+    deviceProps: {type: 'webgl', webgl: {preserveDrawingBuffer: true}}
+  });
+  for (let i = 0; i < 200 && !deck.isInitialized; i++) await sleep(50);
+  const warm = await settle(deck, [255, 0, 0], 200);
+  results.warmup = warm;
+  await post('/log', {step: 'warm', warm, initialized: deck.isInitialized});
+
+  // 1. Drawn vs projected map center on the ground, no position
+  const locations = [[0, 0], [0, 46.2], [-122.19, 0], [-122.19, 46.2], [8.5, 47.3], [13.47, 48.57]];
+  for (const name of ['GlobeView', 'MapView']) {
+    for (const [longitude, latitude] of locations) {
+      for (const pitch of [0, 60]) {
+        for (const zoom of [8, 10, 11.9, 12.01]) {
+          deck.setProps({
+            views: name === 'GlobeView' ? new GlobeView({id: 'v'}) : new MapView({id: 'v'}),
+            viewState: {longitude, latitude, zoom, pitch, bearing: 0},
+            layers: [new ScatterplotLayer({id: 'm', data: [0], getPosition: () => [longitude, latitude, 0],
+              getFillColor: [255, 0, 0], radiusUnits: 'pixels', getRadius: 3, billboard: true})]
+          });
+          const c = await settle(deck, [255, 0, 0], 25);
+          const vp = deck.getViewports()[0];
+          const [px, py] = vp.project([longitude, latitude, 0]);
+          results.cases.push({kind: 'center', view: name, globe: vp.zoom <= 12 && name === 'GlobeView', longitude, latitude, pitch, zoom,
+            projected: py, drawn: c ? c[1] : null, projectedX: px, drawnX: c ? c[0] : null, pixels: c ? c[2] : 0});
+        }
+      }
+    }
+  }
+  await post('/log', {step: 'centers done'});
+
+  // 2. GlobeView with position: marker at the elevation of position, which belongs at the screen center
+  const [longitude, latitude, height] = [-122.19, 46.2, 2000];
+  for (let i = 0; i <= 60; i++) {
+    const zoom = 11.7 + i / 100;
+    deck.setProps({
+      views: new GlobeView({id: 'v'}),
+      viewState: {longitude, latitude, zoom, pitch: 60, bearing: 0, position: [0, 0, height]},
+      layers: [new ScatterplotLayer({id: 'm', data: [0], getPosition: () => [longitude, latitude, height],
+        getFillColor: [0, 0, 255], radiusUnits: 'pixels', getRadius: 4, billboard: true})]
+    });
+    const c = await settle(deck, [0, 0, 255], 25);
+    const vp = deck.getViewports()[0];
+    const [, py] = vp.project([longitude, latitude, height]);
+    results.cases.push({kind: 'position', zoom, globe: zoom <= 12, projected: py, drawn: c ? c[1] : null});
+  }
+  await post('/result', results);
+}
+</script>
+
+</body></html>
