@@ -213,10 +213,15 @@ async function maplibreScene() {
   await new Promise(resolve => map.once('load', resolve));
   const overlay = new MapLibreOverlay({interleaved: true, layers: []});
   map.addControl(overlay);
+  // New layers make the overlay repaint the map, which then goes idle again: update them only when the heights change
+  let heights = '';
   const sync = () => {
-    overlay.setProps({layers: [new ScatterplotLayer({id: 'deck-points',
-      data: scene.points.map(p => [p[0], p[1], map.queryTerrainElevation(p) ?? 0]), getPosition: d => d, radiusUnits: 'pixels',
-      getRadius: 4, getFillColor: PINK, parameters: {depthCompare: 'always', depthWriteEnabled: false}})]});
+    const data = scene.points.map(p => [p[0], p[1], map.queryTerrainElevation(p) ?? 0]);
+    if (JSON.stringify(data) !== heights) {
+      heights = JSON.stringify(data);
+      overlay.setProps({layers: [new ScatterplotLayer({id: 'deck-points', data, getPosition: d => d, radiusUnits: 'pixels',
+        getRadius: 4, getFillColor: PINK, parameters: {depthCompare: 'always', depthWriteEnabled: false}})]});
+    }
     report({viewport: zoom > 12 ? 'deck.gl: WebMercatorViewport' : 'deck.gl: GlobeViewport'});
   };
   map.on('idle', sync);
