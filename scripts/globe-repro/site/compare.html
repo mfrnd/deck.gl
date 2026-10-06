@@ -66,19 +66,39 @@ window.addEventListener('message', event => {
   }
 });
 
-// Play: sweep the zoom range, pausing briefly at the switch
-let playing = false;
-document.getElementById('play').addEventListener('click', async event => {
-  playing = !playing;
-  event.target.textContent = playing ? 'Pause' : 'Play';
-  let zoom = Number(slider.value) >= maxZoom ? minZoom : Number(slider.value);
-  while (playing && zoom <= maxZoom + 1e-6) {
-    setZoom(zoom);
-    await new Promise(resolve => setTimeout(resolve, Math.abs(zoom - 12) < 0.011 ? 900 : 60));
-    zoom += 0.01;
+// Play: sweep the zoom range from wherever the slider is, pausing briefly at the switch.
+// Each step reads the slider, so clicking or dragging it moves playback; holding the thumb holds playback.
+const playButton = document.getElementById('play');
+let timer = null;
+let holding = false;
+slider.addEventListener('pointerdown', () => { holding = true; });
+window.addEventListener('pointerup', () => { holding = false; });
+const stop = () => {
+  clearTimeout(timer);
+  timer = null;
+  playButton.textContent = 'Play';
+};
+const step = () => {
+  if (holding) {
+    timer = setTimeout(step, 60);
+    return;
   }
-  playing = false;
-  event.target.textContent = 'Play';
+  const zoom = Math.round((Number(slider.value) + 0.01) * 100) / 100;
+  if (zoom > maxZoom) {
+    stop();
+    return;
+  }
+  setZoom(zoom);
+  timer = setTimeout(step, Math.abs(zoom - 12) < 0.011 ? 900 : 60);
+};
+playButton.addEventListener('click', () => {
+  if (timer) {
+    stop();
+    return;
+  }
+  playButton.textContent = 'Pause';
+  if (Number(slider.value) >= maxZoom) setZoom(minZoom);
+  timer = setTimeout(step, 60);
 });
 
 // ?autotest=name: step through zoom levels and post both readouts to /result (tools/server.py)
