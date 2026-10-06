@@ -52,6 +52,7 @@ def main():
     import functools
     server = ThreadingHTTPServer(("127.0.0.1", args.port), functools.partial(Handler, directory=str(args.dir)))
     server.out_dir = args.dir / "out"
+    server.out_dir.mkdir(exist_ok=True)
     server.serve_forever()
 
 

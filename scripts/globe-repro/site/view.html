@@ -21,6 +21,7 @@ const DOT = [220, 20, 60];
 const PINK = [255, 0, 170];
 let zoom = Number(params.get('zoom') || scene.zoom[2]);
 let update = () => {};
+let setMeasure = () => {};
 
 function loadScript(src) {
   return new Promise((resolve, reject) => {
@@ -125,7 +126,8 @@ async function terrainScene() {
   const deck = new Deck({
     parent: document.getElementById('map'), views: view, viewState: scene.viewState(zoom), controller: false,
     layers: [
-      new TerrainLayer({id: 'terrain', elevationData: scene.terrarium, maxZoom: 12, color: [215, 215, 215],
+      new TerrainLayer({id: 'terrain', elevationData: scene.terrarium, maxZoom: 12, color: [215, 215, 215], pickable: true,
+        onTileLoad: () => { changed = true; },
         elevationDecoder: {rScaler: 256, gScaler: 1, bScaler: 1 / 256, offset: -32768}}),
       new ScatterplotLayer({id: 'markers', data: markers, getPosition: d => d, radiusUnits: 'pixels', getRadius: 6,
         getFillColor: PINK, stroked: true, getLineColor: [255, 255, 255], lineWidthUnits: 'pixels', getLineWidth: 2,
@@ -135,9 +137,53 @@ async function terrainScene() {
       const viewport = deck.getViewports()[0];
       postTrace(view, viewport);
       report({viewport: zoom < 12 ? 'below 12: WEB_MERCATOR' : '12 and up: WEB_MERCATOR_AUTO_OFFSET', ...cameraOf(viewport)});
+      if (measuring && refreshed) {
+        refreshed = false;
+        setTimeout(measureSurface, 0);
+      } else if (measuring && changed) {
+        clearTimeout(measureTimer);
+        measureTimer = setTimeout(refreshTerrain, 100);
+      }
     }
   });
-  update = () => deck.setProps({viewState: scene.viewState(zoom)});
+  update = () => {
+    changed = true;
+    deck.setProps({viewState: scene.viewState(zoom)});
+  };
+
+  // The terrain as this build draws it: picking with unproject3D reads the depth of the drawn surface, so these
+  // points include any error in how the build projects the mesh. The center column of the view lies in the side
+  // view's plane, since the bearing is 0.
+  let measuring = false;
+  let changed = false;
+  let refreshed = false;
+  let measureTimer = null;
+  let measureCount = 0;
+  // TerrainLayer keeps the elevation range of its tiles in its state (onViewportLoad) and passes it to its TileLayer
+  // only when it renders its sublayers again. When the view changes while the first tiles load, that may not happen,
+  // and picking then culls the tiles as if they were at sea level and misses the high ones. A changed update trigger
+  // makes TerrainLayer render its sublayers with the current range at the next update, without reloading tiles;
+  // the measurement follows the render after it.
+  const refreshTerrain = () => {
+    changed = false;
+    refreshed = true;
+    const [terrain, ...others] = deck.props.layers;
+    deck.setProps({layers: [terrain.clone({updateTriggers: {measureCount: ++measureCount}}), ...others]});
+  };
+  const measureSurface = () => {
+    const {width, height} = deck.getViewports()[0];
+    const points = [];
+    for (let i = 0; i < 64; i++) {
+      const info = deck.pickObject({x: width / 2, y: ((i + 0.5) / 64) * height, radius: 0, unproject3D: true});
+      if (info && info.coordinate && info.coordinate.length === 3) points.push(Array.from(info.coordinate));
+    }
+    parent.postMessage({type: 'surface', build, zoom, points}, '*');
+  };
+  setMeasure = enabled => {
+    measuring = enabled;
+    clearTimeout(measureTimer);
+    if (measuring) refreshTerrain();
+  };
 }
 
 async function maplibreScene() {
@@ -190,6 +236,7 @@ window.addEventListener('message', event => {
     zoom = event.data.zoom;
     update();
   }
+  if (event.data && event.data.type === 'measure') setMeasure(event.data.enabled);
 });
 
 await loadScript(`bundles/deck-${build}.js`);

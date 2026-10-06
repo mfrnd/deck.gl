@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Record frames</title></head>
+<body>
+<script type="module">
+// Records one frame per zoom step of view.html for each build, with its readout and camera, in the renderer of the
+// browser that opens it (e.g. SwiftShader, see the README). Posts each build to /result?v=<v>-<build> and then
+// /result?v=<v> (tools/server.py); tools/save_recording.py writes the frames into the site.
+// Parameters: site (folder of the built site, relative to this page), scene, builds, name (of the renderer), size, v.
+const params = new URLSearchParams(location.search);
+const site = params.get('site') || './';
+const sceneId = params.get('scene');
+const builds = params.get('builds').split(',');
+const name = params.get('name') || 'swiftshader';
+const [width, height] = (params.get('size') || '640,480').split(',').map(Number);
+const v = params.get('v') || 'record';
+const {SCENES} = await import(`./${site}scenes.js`);
+const [minZoom, maxZoom] = SCENES[sceneId].zoom;
+const info = await (await fetch(`${site}build.json`)).json();
+const gl = document.createElement('canvas').getContext('webgl2');
+const debug = gl.getExtension('WEBGL_debug_renderer_info');
+const renderer = debug ? gl.getParameter(debug.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER);
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+const waitFor = async (test, ms) => {
+  for (let t = 0; t < ms && !test(); t += 20) await sleep(20);
+  return test();
+};
+
+let latest = null;
+let trace = null;
+window.addEventListener('message', event => {
+  const data = event.data || {};
+  if (data.type === 'readout') latest = data;
+  if (data.type === 'trace') trace = data.samples;
+});
+
+for (const build of builds) {
+  latest = null;
+  trace = null;
+  const frame = document.createElement('iframe');
+  frame.style.cssText = `width:${width}px;height:${height}px;border:0`;
+  // Start away from the first zoom step, which then renders on request
+  frame.src = `${site}view.html?scene=${sceneId}&build=${build}&zoom=${maxZoom}`;
+  document.body.append(frame);
+  await waitFor(() => latest && trace, 60000);
+  const frames = [];
+  for (let step = Math.round(minZoom * 100); step <= Math.round(maxZoom * 100); step++) {
+    const zoom = step / 100;
+    latest = null;
+    frame.contentWindow.postMessage({type: 'zoom', zoom}, '*');
+    await waitFor(() => latest && latest.zoom === zoom, 30000);
+    // Shaders may still compile on the first frames: wait for a measured offset
+    await waitFor(() => typeof latest.offset === 'number', 2000);
+    const {offset, what, viewport, camera, target} = latest;
+    const image = frame.contentDocument.querySelector('canvas').toDataURL('image/webp', 0.85);
+    frames.push({zoom, offset, what, viewport, camera, target, image});
+  }
+  const recording = {scene: sceneId, build, name, renderer, size: [width, height], source: info.builds[build], trace, frames};
+  await fetch(`/result?v=${v}-${build}`, {method: 'POST', body: JSON.stringify(recording)});
+  frame.remove();
+}
+await fetch(`/result?v=${v}`, {method: 'POST', body: JSON.stringify({builds})});
+</script>
+</body></html>
