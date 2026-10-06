@@ -13,6 +13,13 @@ Side-by-side comparisons of deck.gl builds around zoom 12, where `GlobeView` swi
 | `TerrainLayer` on a `MapView` | master vs cartesian z fix | Pink markers at their DEM elevation belong on the terrain. On master the terrain is too flat below zoom 12 and pops up at 12. |
 | GlobeView alone near Zurich | master vs master + `patches/globe-sincos.patch` | Only differs under software rendering, whose `sin`/`cos` are inaccurate. |
 
+Below each view, a side view shows that build's camera in the north-south plane through the map center,
+seen from the east, at the same scale on both sides: the camera and its line of sight to the target
+(`unprojectPosition` of the viewport's `cameraPosition` and `center`), the camera's trace over the zoom range
+with a dot every 0.1 zoom, and red dashes where it jumps. For the MapLibre scene the overlay's camera depends on
+MapLibre's state, so its trace fills in as the map is zoomed. In the `TerrainLayer` and sin/cos comparisons the
+camera is the same in both builds; their differences are in how positions are drawn.
+
 Builds are fixed commits, listed in `build.mjs` and in the site's `build.json`:
 
 - master: `d1b0ae43`
@@ -40,6 +47,7 @@ touched. It also copies MapLibre GL JS 6 (its worker must be served from the sam
 To see the sin/cos difference in Chrome, start it with
 `--use-angle=swiftshader --enable-unsafe-swiftshader`; the pages show which renderer is in use.
 
+`compare.html?scene=<id>&zoom=<zoom>` opens a comparison at a zoom level.
 `compare.html?scene=<id>&autotest=<name>&zooms=11.9,12,12.01` steps through the zoom levels and posts
 both readouts to `/result?v=<name>` (see `tools/server.py`).
 
