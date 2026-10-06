@@ -45,6 +45,8 @@ export const SCENES = {
     builds: ['master', 'pr1'],
     zoom: [11.5, 12.5, 11.9],
     kind: 'terrain',
+    // Checkbox for the terrain as each build draws it, picked along the center column, in the side views
+    measure: true,
     terrarium: TERRARIUM,
     viewState: zoom => ({longitude: -122.19, latitude: 46.18, zoom, pitch: 60, bearing: 0, position: [0, 0, 2000]}),
     markers: [
@@ -57,10 +59,19 @@ export const SCENES = {
   'globe-sincos': {
     title: 'GlobeView alone, looking straight down near Zurich',
     description:
-      'Red dot: the map center on the ground. It belongs on the crosshair. ' +
-      'The two sides only differ under software rendering (SwiftShader), whose sin/cos are inaccurate: ' +
-      'on a GPU both are correct.',
+      'Red dot: the map center on the ground. It belongs on the crosshair. A GPU draws it there. ' +
+      'Software rendering (SwiftShader, as in headless browsers and CI) has inaccurate sin/cos, which moves the globe ' +
+      'below zoom 12; the sin/cos patch computes them in the shader. A page cannot choose its renderer, so the ' +
+      'software panels are frames recorded with SwiftShader, with their measured offsets.',
     builds: ['master', 'sincos'],
+    // Software rendering cannot be chosen from a page: its panels are frames recorded with tools/record.html
+    panels: [
+      {build: 'master', label: 'GPU, live in this browser: master'},
+      {build: 'master', recording: 'swiftshader', tone: 'before', label: 'SwiftShader, recorded: master'},
+      {build: 'sincos', recording: 'swiftshader', tone: 'after', label: 'SwiftShader, recorded: master + sin/cos patch'}
+    ],
+    // Render size of every panel, scaled to fit, so live and recorded frames match
+    size: [640, 480],
     zoom: [10, 12.5, 11.95],
     kind: 'deck',
     viewState: zoom => ({longitude: 8.5, latitude: 47.3, zoom, pitch: 0, bearing: 0}),

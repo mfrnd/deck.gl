@@ -12,15 +12,27 @@ header p { margin: 0 0 12px; color: var(--muted); max-width: 980px; }
 /* The controls row is as wide as the two panels: up to 640px each side by side, stacked below 1000px */
 #panels, .controls { max-width: 1296px; }
 #panels { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+#panels.three { grid-template-columns: repeat(3, 1fr); }
 @media (max-width: 1000px) {
   #panels, .controls { max-width: 640px; }
-  #panels { grid-template-columns: 1fr; }
+  #panels, #panels.three { grid-template-columns: 1fr; }
 }
 .panel { margin: 0; min-width: 0; }
 .panel figcaption { font-weight: 600; margin-bottom: 4px; }
+/* Narrow captions may wrap: keep the three views level */
+#panels.three .panel figcaption { min-height: 2.9em; }
 .panel figcaption.before { color: var(--before); }
 .panel figcaption.after { color: var(--after); }
 .panel iframe { width: 100%; aspect-ratio: 4 / 3; border: 1px solid var(--line); display: block; }
+/* A view rendered at a fixed size (live iframe or recorded frames), scaled to the panel width */
+.stage { position: relative; box-sizing: border-box; aspect-ratio: 4 / 3; overflow: hidden; border: 1px solid var(--line); background: #f8fafd; }
+.stage iframe { position: absolute; left: 0; top: 0; border: 0; transform-origin: 0 0; }
+.stage img { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+/* The crosshair of view.html: 32 of 640 by 480 pixels */
+.stage .crosshair { position: absolute; left: 47.5%; top: 46.667%; width: 5%; height: 6.667%; pointer-events: none; }
+.stage .crosshair::before, .stage .crosshair::after { content: ''; position: absolute; background: #000; }
+.stage .crosshair::before { left: 0; right: 0; top: 50%; height: 1px; }
+.stage .crosshair::after { top: 0; bottom: 0; left: 50%; width: 1px; }
 .readout { font-variant-numeric: tabular-nums; color: var(--muted); min-height: 1.4em; margin-top: 4px; }
 .side-title { margin-top: 10px; font-size: 13px; font-weight: 600; }
 .side { display: block; box-sizing: border-box; width: 100%; aspect-ratio: 16 / 7; margin-top: 4px; border: 1px solid var(--line); background: #f7fbff; }
@@ -36,6 +48,9 @@ header p { margin: 0 0 12px; color: var(--muted); max-width: 980px; }
 .side .jump-end { fill: #fff; stroke: #c62828; stroke-width: 1.5; }
 .side .jump-label { fill: #c62828; font-weight: 600; }
 .side .sight { stroke: #1f4e9c; stroke-width: 1.5; }
+.side .surface { fill: none; stroke: #e65100; stroke-width: 2; }
+.side .surface-point { fill: #e65100; }
+.side .surface-label { fill: #e65100; font-weight: 600; }
 .side .camera { fill: #1f4e9c; stroke: #fff; stroke-width: 1.5; }
 .side .target { fill: #c2185b; stroke: #fff; stroke-width: 1.5; }
 .side-readout { font-variant-numeric: tabular-nums; color: var(--muted); min-height: 1.4em; margin-top: 4px; font-size: 13px; }
