@@ -82,6 +82,15 @@ both readouts to `/result?v=<name>` (see `tools/server.py`).
   `trig.html`: GLSL `sin`/`cos` accuracy via transform feedback
 - `server.py`: serves the pages and stores posted results in `out/`
 - `record.html` and `save_recording.py`: record frames of a scene in the browser's renderer into the site
+- `capture_frames.mjs` and `frames_to_gif.py`: GIFs of a comparison page under GitHub's 10 MB limit for images.
+  The first starts a headless Chromium (Edge or Chrome), steps the zoom through the DevTools protocol and
+  screenshots the views once they have settled; the second holds at zoom 12 and scales down until the GIF fits:
+
+  ```sh
+  node scripts/globe-repro/tools/capture_frames.mjs --browser <path to msedge or chrome> \
+    --url 'https://mfrnd.github.io/deck.gl/compare.html?scene=globe-position' --out frames/globe-position --zooms 11.5:12.5:0.02
+  python3 scripts/globe-repro/tools/frames_to_gif.py frames/globe-position --out globe-position.gif
+  ```
 - `run_edge.sh`: headless Windows Edge on the GPU from WSL; `run_sw.sh`: SwiftShader in Playwright's
   headless shell
 - `make_gif.py`, `make_demo.py`, `make_demo_2x2.py`: side-by-side GIFs and videos with measured readouts
