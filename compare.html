@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Globe repro: compare</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <a href="index.html">All comparisons</a>
+  <h1 id="title"></h1>
+  <p id="description"></p>
+</header>
+<main id="panels"></main>
+<section class="controls">
+  <button id="play">Play</button>
+  <input id="zoom" type="range" step="0.01">
+  <output id="zoomValue"></output>
+  <span class="jumps">
+    <button data-zoom="11.99">11.99</button><button data-zoom="12">12.00</button><button data-zoom="12.01">12.01</button>
+  </span>
+</section>
+<p class="note">Zoom 12: GlobeView switches from GlobeViewport to WebMercatorViewport, and deck.gl's flat projection switches
+  from WEB_MERCATOR to WEB_MERCATOR_AUTO_OFFSET. Renderer of this browser: <span id="renderer"></span></p>
+<script type="module">
+import {BUILDS, SCENES} from './scenes.js';
+
+const params = new URLSearchParams(location.search);
+const sceneId = params.get('scene') in SCENES ? params.get('scene') : 'globe-position';
+const scene = SCENES[sceneId];
+const [minZoom, maxZoom, startZoom] = scene.zoom;
+document.title = scene.title;
+document.getElementById('title').textContent = scene.title;
+document.getElementById('description').textContent = scene.description;
+
+const panels = document.getElementById('panels');
+const frames = {};
+const readouts = {};
+scene.builds.forEach((build, i) => {
+  const panel = document.createElement('figure');
+  panel.className = 'panel';
+  panel.innerHTML = `<figcaption class="${i ? 'after' : 'before'}">${i ? 'After' : 'Before'}: ${BUILDS[build]}</figcaption>
+    <iframe title="${BUILDS[build]}" src="view.html?scene=${sceneId}&build=${build}&zoom=${startZoom}"></iframe>
+    <div class="readout">loading</div>`;
+  panels.append(panel);
+  frames[build] = panel.querySelector('iframe');
+  readouts[build] = panel.querySelector('.readout');
+});
+
+const slider = document.getElementById('zoom');
+Object.assign(slider, {min: minZoom, max: maxZoom, value: startZoom});
+const zoomValue = document.getElementById('zoomValue');
+const setZoom = zoom => {
+  zoom = Math.round(zoom * 100) / 100;
+  slider.value = zoom;
+  zoomValue.textContent = `zoom ${zoom.toFixed(2)}`;
+  for (const frame of Object.values(frames)) frame.contentWindow.postMessage({type: 'zoom', zoom}, '*');
+};
+slider.addEventListener('input', () => setZoom(Number(slider.value)));
+document.querySelectorAll('[data-zoom]').forEach(b => b.addEventListener('click', () => setZoom(Number(b.dataset.zoom))));
+zoomValue.textContent = `zoom ${startZoom.toFixed(2)}`;
+
+window.addEventListener('message', event => {
+  const {type, build, offset, what, viewport} = event.data || {};
+  if (type === 'readout' && readouts[build]) {
+    readouts[build].textContent = [viewport, typeof offset === 'number' ? `${what}: ${offset.toFixed(1)} px` : null]
+      .filter(Boolean).join(' | ');
+  }
+});
+
+// Play: sweep the zoom range, pausing briefly at the switch
+let playing = false;
+document.getElementById('play').addEventListener('click', async event => {
+  playing = !playing;
+  event.target.textContent = playing ? 'Pause' : 'Play';
+  let zoom = Number(slider.value) >= maxZoom ? minZoom : Number(slider.value);
+  while (playing && zoom <= maxZoom + 1e-6) {
+    setZoom(zoom);
+    await new Promise(resolve => setTimeout(resolve, Math.abs(zoom - 12) < 0.011 ? 900 : 60));
+    zoom += 0.01;
+  }
+  playing = false;
+  event.target.textContent = 'Play';
+});
+
+// ?autotest=name: step through zoom levels and post both readouts to /result (tools/server.py)
+if (params.get('autotest')) {
+  const zooms = (params.get('zooms') || '11.9,12,12.01,12.1').split(',').map(Number);
+  const latest = {};
+  window.addEventListener('message', event => {
+    const d = event.data || {};
+    if (d.type === 'readout') latest[d.build] = d;
+  });
+  const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+  (async () => {
+    const results = [];
+    for (let i = 0; i < 600 && scene.builds.some(b => !latest[b]); i++) await sleep(100);
+    for (const zoom of zooms) {
+      for (const b of scene.builds) delete latest[b];
+      setZoom(zoom);
+      for (let i = 0; i < 600 && scene.builds.some(b => !latest[b] || Math.abs(latest[b].zoom - zoom) > 1e-6); i++) await sleep(100);
+      await sleep(400);
+      results.push({zoom, readouts: Object.fromEntries(scene.builds.map(b => [b, latest[b] || null]))});
+    }
+    await fetch(`/result?v=${params.get('autotest')}`, {method: 'POST', body: JSON.stringify({scene: sceneId, renderer: document.getElementById('renderer').textContent, results})});
+  })();
+}
+
+const gl = document.createElement('canvas').getContext('webgl2');
+const info = gl && gl.getExtension('WEBGL_debug_renderer_info');
+document.getElementById('renderer').textContent = gl ? (info ? gl.getParameter(info.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER)) : 'no WebGL2';
+</script>
+</body></html>

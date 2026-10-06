@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>deck.gl globe reproductions</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>deck.gl globe reproductions</h1>
+  <p>Side-by-side comparisons of deck.gl builds, each with a shared zoom slider. Every page renders live in this browser.</p>
+</header>
+<main class="list">
+  <ul id="scenes"></ul>
+  <h2>Builds</h2>
+  <ul id="builds"><li>loading build.json</li></ul>
+  <h2>Renderer</h2>
+  <p>This browser renders WebGL with: <strong id="renderer"></strong></p>
+  <p>The globe sin/cos comparison only differs under software rendering. To see it in Chrome, start it with
+    <code>--use-angle=swiftshader --enable-unsafe-swiftshader</code> (or <code>--disable-gpu</code> where software
+    rendering is allowed); the renderer above then names SwiftShader.</p>
+  <h2>Data</h2>
+  <p>Terrain: Terrarium tiles from the AWS Open Data terrain tiles (Mapzen; USGS 3DEP, GMTED2010, SRTM). Base map:
+    MapLibre GL JS (BSD-3-Clause).</p>
+</main>
+<script type="module">
+import {BUILDS, SCENES} from './scenes.js';
+
+const list = document.getElementById('scenes');
+for (const [id, scene] of Object.entries(SCENES)) {
+  const li = document.createElement('li');
+  li.innerHTML = `<a href="compare.html?scene=${id}">${scene.title}</a>: ${BUILDS[scene.builds[0]]} vs ${BUILDS[scene.builds[1]]}`;
+  list.append(li);
+}
+fetch('build.json').then(r => r.json()).then(info => {
+  const ul = document.getElementById('builds');
+  ul.innerHTML = '';
+  for (const [name, b] of Object.entries(info.builds)) {
+    const li = document.createElement('li');
+    li.innerHTML = `<strong>${BUILDS[name] || name}</strong>: commit <code>${b.commit}</code>${b.patch ? ` + <code>${b.patch}</code>` : ''}`;
+    ul.append(li);
+  }
+}).catch(() => {});
+const gl = document.createElement('canvas').getContext('webgl2');
+const info = gl && gl.getExtension('WEBGL_debug_renderer_info');
+document.getElementById('renderer').textContent = gl ? (info ? gl.getParameter(info.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER)) : 'no WebGL2';
+</script>
+</body></html>

@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Globe repro view</title>
+<link rel="stylesheet" href="maplibre/maplibre-gl.css">
+<style>
+  html, body { margin: 0; height: 100%; background: #f8fafd; overflow: hidden; }
+  #map { position: absolute; inset: 0; }
+  .crosshair { position: absolute; left: 50%; top: 50%; width: 32px; height: 32px; margin: -16px 0 0 -16px; pointer-events: none; }
+  .crosshair::before, .crosshair::after { content: ''; position: absolute; background: #000; }
+  .crosshair::before { left: 0; right: 0; top: 50%; height: 1px; }
+  .crosshair::after { top: 0; bottom: 0; left: 50%; width: 1px; }
+</style></head>
+<body><div id="map"></div>
+<script type="module">
+import {SCENES, grid} from './scenes.js';
+
+const params = new URLSearchParams(location.search);
+const scene = SCENES[params.get('scene')];
+const build = params.get('build');
+const DOT = [220, 20, 60];
+const PINK = [255, 0, 170];
+let zoom = Number(params.get('zoom') || scene.zoom[2]);
+let update = () => {};
+
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    const s = document.createElement('script'); s.src = src; s.onload = resolve; s.onerror = reject; document.head.append(s);
+  });
+}
+
+function report(data) {
+  parent.postMessage({type: 'readout', build, zoom, ...data}, '*');
+}
+
+// Center of the pixels of one color in the drawing buffer, as an offset from the canvas center in CSS pixels
+function colorOffset(gl, canvas, color, tolerance = 14) {
+  const {drawingBufferWidth: w, drawingBufferHeight: h} = gl;
+  const data = new Uint8Array(w * h * 4);
+  gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, data);
+  let sx = 0, sy = 0, n = 0;
+  for (let i = 0; i < data.length; i += 4) {
+    if (Math.abs(data[i] - color[0]) < tolerance && Math.abs(data[i + 1] - color[1]) < tolerance && Math.abs(data[i + 2] - color[2]) < tolerance) {
+      sx += (i / 4) % w; sy += h - 1 - Math.floor(i / 4 / w); n++;
+    }
+  }
+  if (!n) return null;
+  const scale = w / canvas.clientWidth;
+  return [(sx / n + 0.5) / scale - canvas.clientWidth / 2, (sy / n + 0.5) / scale - canvas.clientHeight / 2];
+}
+
+async function elevationAt(lng, lat, z = 12) {
+  // Terrarium tile pixel: (r * 256 + g + b / 256) - 32768 meters
+  const n = 2 ** z;
+  const x = ((lng + 180) / 360) * n;
+  const latRad = (lat * Math.PI) / 180;
+  const y = ((1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2) * n;
+  const url = scene.terrarium.replace('{z}', z).replace('{x}', Math.floor(x)).replace('{y}', Math.floor(y));
+  const bitmap = await createImageBitmap(await (await fetch(url)).blob());
+  const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(bitmap, 0, 0);
+  const [r, g, b] = ctx.getImageData(Math.floor((x % 1) * bitmap.width), Math.floor((y % 1) * bitmap.height), 1, 1).data;
+  return r * 256 + g + b / 256 - 32768;
+}
+
+async function deckScene() {
+  const {Deck, GlobeView, PathLayer, ScatterplotLayer} = window.deck;
+  const [lng, lat, height] = scene.marker.position;
+  const crosshair = document.createElement('div'); crosshair.className = 'crosshair'; document.body.append(crosshair);
+  const layers = [
+    new PathLayer({id: 'grid', data: grid(lng, lat), getPath: d => d.path, widthUnits: 'pixels',
+      getWidth: d => (d.major ? 2 : 1), getColor: d => (d.major ? [110, 110, 110] : [185, 185, 185])}),
+    scene.marker.mast && new PathLayer({id: 'mast', data: [0], getPath: () => [[lng, lat, 0], [lng, lat, height]],
+      widthUnits: 'pixels', getWidth: 3, getColor: [200, 40, 40], billboard: true}),
+    new ScatterplotLayer({id: 'dot', data: [0], getPosition: () => scene.marker.position, radiusUnits: 'pixels', getRadius: 7,
+      getFillColor: DOT, stroked: true, getLineColor: [255, 255, 255], lineWidthUnits: 'pixels', getLineWidth: 2,
+      billboard: true, parameters: {depthCompare: 'always', depthWriteEnabled: false}})
+  ].filter(Boolean);
+  const deck = new Deck({
+    parent: document.getElementById('map'), views: new GlobeView({id: 'globe'}), viewState: scene.viewState(zoom), layers,
+    controller: false, deviceProps: {type: 'webgl', webgl: {preserveDrawingBuffer: true}},
+    onAfterRender: () => {
+      const gl = deck.device && deck.device.gl;
+      if (!gl) return;
+      const offset = colorOffset(gl, deck.getCanvas(), DOT);
+      report({offset: offset && Math.hypot(...offset), what: 'dot off the crosshair',
+        viewport: zoom > 12 ? 'WebMercatorViewport' : 'GlobeViewport'});
+    }
+  });
+  update = () => deck.setProps({viewState: scene.viewState(zoom)});
+}
+
+async function terrainScene() {
+  const {Deck, MapView, TerrainLayer, ScatterplotLayer} = window.deck;
+  const heights = await Promise.all(scene.markers.map(([lng, lat]) => elevationAt(lng, lat)));
+  const markers = scene.markers.map(([lng, lat], i) => [lng, lat, heights[i]]);
+  const deck = new Deck({
+    parent: document.getElementById('map'), views: new MapView({id: 'map'}), viewState: scene.viewState(zoom), controller: false,
+    layers: [
+      new TerrainLayer({id: 'terrain', elevationData: scene.terrarium, maxZoom: 12, color: [215, 215, 215],
+        elevationDecoder: {rScaler: 256, gScaler: 1, bScaler: 1 / 256, offset: -32768}}),
+      new ScatterplotLayer({id: 'markers', data: markers, getPosition: d => d, radiusUnits: 'pixels', getRadius: 6,
+        getFillColor: PINK, stroked: true, getLineColor: [255, 255, 255], lineWidthUnits: 'pixels', getLineWidth: 2,
+        billboard: true, parameters: {depthCompare: 'always', depthWriteEnabled: false}})
+    ],
+    onAfterRender: () => report({viewport: zoom < 12 ? 'below 12: WEB_MERCATOR' : '12 and up: WEB_MERCATOR_AUTO_OFFSET'})
+  });
+  update = () => deck.setProps({viewState: scene.viewState(zoom)});
+}
+
+async function maplibreScene() {
+  const maplibregl = await import('./maplibre/maplibre-gl.mjs');
+  const {MapLibreOverlay, ScatterplotLayer} = window.deck;
+  const map = new maplibregl.Map({
+    container: 'map',
+    style: {
+      version: 8,
+      projection: {type: 'globe'},
+      sources: {
+        dem: {type: 'raster-dem', tiles: [scene.terrarium], encoding: 'terrarium', tileSize: 256, maxzoom: 14},
+        shade: {type: 'raster-dem', tiles: [scene.terrarium], encoding: 'terrarium', tileSize: 256, maxzoom: 14},
+        points: {type: 'geojson', data: {type: 'FeatureCollection',
+          features: scene.points.map(p => ({type: 'Feature', properties: {}, geometry: {type: 'Point', coordinates: p}}))}}
+      },
+      layers: [
+        {id: 'background', type: 'background', paint: {'background-color': '#eef1f4'}},
+        {id: 'hillshade', type: 'hillshade', source: 'shade', paint: {'hillshade-exaggeration': 0.6}},
+        {id: 'circles', type: 'circle', source: 'points', paint: {'circle-radius': 8, 'circle-color': 'rgb(0, 200, 230)',
+          'circle-stroke-color': '#ffffff', 'circle-stroke-width': 1.5, 'circle-pitch-alignment': 'viewport'}}
+      ],
+      terrain: {source: 'dem', exaggeration: 1}
+    },
+    center: scene.center, zoom, pitch: 60, bearing: 0, attributionControl: false, interactive: false
+  });
+  await new Promise(resolve => map.once('load', resolve));
+  const overlay = new MapLibreOverlay({interleaved: true, layers: []});
+  map.addControl(overlay);
+  const sync = () => {
+    overlay.setProps({layers: [new ScatterplotLayer({id: 'deck-points',
+      data: scene.points.map(p => [p[0], p[1], map.queryTerrainElevation(p) ?? 0]), getPosition: d => d, radiusUnits: 'pixels',
+      getRadius: 4, getFillColor: PINK, parameters: {depthCompare: 'always', depthWriteEnabled: false}})]});
+    report({viewport: zoom > 12 ? 'deck.gl: WebMercatorViewport' : 'deck.gl: GlobeViewport'});
+  };
+  map.on('idle', sync);
+  update = () => map.jumpTo({zoom});
+}
+
+window.addEventListener('message', event => {
+  if (event.data && event.data.type === 'zoom') {
+    zoom = event.data.zoom;
+    update();
+  }
+});
+
+await loadScript(`bundles/deck-${build}.js`);
+await ({deck: deckScene, terrain: terrainScene, maplibre: maplibreScene})[scene.kind]();
+parent.postMessage({type: 'ready', build}, '*');
+</script>
+</body></html>
