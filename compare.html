@@ -19,14 +19,17 @@
   </span>
 </section>
 <p class="note">Zoom 12: GlobeView switches from GlobeViewport to WebMercatorViewport, and deck.gl's flat projection switches
-  from WEB_MERCATOR to WEB_MERCATOR_AUTO_OFFSET. Renderer of this browser: <span id="renderer"></span></p>
+  from WEB_MERCATOR to WEB_MERCATOR_AUTO_OFFSET. Side views: the north-south plane through the map center seen from the
+  east, at the same scale on both sides. Each build's camera and target come from its own deck.gl viewport. The trace is
+  the camera over the zoom range, red dashes mark a jump. Renderer of this browser: <span id="renderer"></span></p>
 <script type="module">
 import {BUILDS, SCENES} from './scenes.js';
 
 const params = new URLSearchParams(location.search);
 const sceneId = params.get('scene') in SCENES ? params.get('scene') : 'globe-position';
 const scene = SCENES[sceneId];
-const [minZoom, maxZoom, startZoom] = scene.zoom;
+const [minZoom, maxZoom] = scene.zoom;
+const startZoom = Math.min(Math.max(Number(params.get('zoom')) || scene.zoom[2], minZoom), maxZoom);
 document.title = scene.title;
 document.getElementById('title').textContent = scene.title;
 document.getElementById('description').textContent = scene.description;
@@ -34,15 +37,20 @@ document.getElementById('description').textContent = scene.description;
 const panels = document.getElementById('panels');
 const frames = {};
 const readouts = {};
+const sides = {};
 scene.builds.forEach((build, i) => {
   const panel = document.createElement('figure');
   panel.className = 'panel';
   panel.innerHTML = `<figcaption class="${i ? 'after' : 'before'}">${i ? 'After' : 'Before'}: ${BUILDS[build]}</figcaption>
     <iframe title="${BUILDS[build]}" src="view.html?scene=${sceneId}&build=${build}&zoom=${startZoom}"></iframe>
-    <div class="readout">loading</div>`;
+    <div class="readout">loading</div>
+    <div class="side-title">Side view from the east, km: north of the map center →, altitude ↑</div>
+    <svg class="side" role="img" aria-label="Side view of the camera of ${BUILDS[build]}"></svg>
+    <div class="side-readout"></div>`;
   panels.append(panel);
   frames[build] = panel.querySelector('iframe');
   readouts[build] = panel.querySelector('.readout');
+  sides[build] = {svg: panel.querySelector('.side'), readout: panel.querySelector('.side-readout'), samples: new Map(), current: null};
 });
 
 const slider = document.getElementById('zoom');
@@ -53,16 +61,201 @@ const setZoom = zoom => {
   slider.value = zoom;
   zoomValue.textContent = `zoom ${zoom.toFixed(2)}`;
   for (const frame of Object.values(frames)) frame.contentWindow.postMessage({type: 'zoom', zoom}, '*');
+  drawSides();
 };
 slider.addEventListener('input', () => setZoom(Number(slider.value)));
 document.querySelectorAll('[data-zoom]').forEach(b => b.addEventListener('click', () => setZoom(Number(b.dataset.zoom))));
 zoomValue.textContent = `zoom ${startZoom.toFixed(2)}`;
 
+// Side views: the north-south plane through the map center seen from the east (north to the right), in meters north of
+// the map center and meters above sea level, at the same scale on both sides
+const EARTH_RADIUS = 6371008.8;
+const sceneView = scene.viewState
+  ? scene.viewState(startZoom)
+  : {longitude: scene.center[0], latitude: scene.center[1], pitch: scene.pitch};
+const [centerLng, centerLat] = [sceneView.longitude, sceneView.latitude];
+const positionHeight = sceneView.position ? sceneView.position[2] : 0;
+let centerElevation = null;
+let profile = null;
+
+const toSide = ([lng, lat, altitude]) => [((lat - centerLat) * Math.PI / 180) * EARTH_RADIUS, altitude];
+
+// Distance from the camera to its target in meters: deck.gl and MapLibre put it 1.5 viewport heights away
+const cameraDistance = (zoom, height) =>
+  (1.5 * height * 40075016.686 * Math.cos(centerLat * Math.PI / 180)) / (512 * 2 ** zoom);
+
+// Where the camera should aim, drawn as a ring
+function reference(zoom) {
+  if (scene.kind === 'maplibre') {
+    if (zoom <= 11) return {altitude: 0, label: 'MapLibre aims at sea level'};
+    if (zoom >= 12) return {altitude: centerElevation, label: 'MapLibre aims at the terrain'};
+    return {altitude: null, label: 'MapLibre blends globe and Mercator: no single target'};
+  }
+  return {altitude: positionHeight, label: positionHeight ? `position: ${positionHeight.toLocaleString('en')} m up` : 'map center'};
+}
+
+const niceStep = (span, count) => {
+  const raw = span / count;
+  const power = 10 ** Math.floor(Math.log10(raw));
+  return [1, 2, 5, 10].map(m => m * power).find(step => step >= raw);
+};
+const km = meters => (Math.abs(meters) / 1000).toFixed(2);
+
+let drawPending = false;
+function drawSides() {
+  if (drawPending) return;
+  drawPending = true;
+  requestAnimationFrame(() => {
+    drawPending = false;
+    const {clientWidth: width, clientHeight: height} = sides[scene.builds[0]].svg;
+    if (!width) return;
+    // The view follows the zoom, not the cameras, so a camera that jumps moves against the ground
+    const zoom = Number(slider.value);
+    const distance = cameraDistance(zoom, frames[scene.builds[0]].clientHeight);
+    const pitch = (sceneView.pitch * Math.PI) / 180;
+    const targetAltitude = scene.kind === 'maplibre' ? centerElevation || 0 : positionHeight;
+    const camera = [-distance * Math.sin(pitch), targetAltitude + distance * Math.cos(pitch)];
+    const box = [Math.min(camera[0], 0) - 0.25 * distance, Math.min(0, targetAltitude) - 0.08 * distance,
+      Math.max(camera[0], 0) + 0.3 * distance, camera[1] + 0.22 * distance];
+    const scale = Math.min(width / (box[2] - box[0]), height / (box[3] - box[1]));
+    const [cx, cy] = [(box[0] + box[2]) / 2, (box[1] + box[3]) / 2];
+    const extent = {x0: cx - width / 2 / scale, x1: cx + width / 2 / scale, y0: cy - height / 2 / scale, y1: cy + height / 2 / scale};
+    const X = x => ((x - extent.x0) * scale).toFixed(1);
+    const Y = y => (height - (y - extent.y0) * scale).toFixed(1);
+    for (const build of scene.builds) drawSide(sides[build], {width, height, extent, X, Y, zoom});
+  });
+}
+
+function drawSide(side, {width, height, extent, X, Y, zoom}) {
+  const {x0, x1, y0, y1} = extent;
+  const parts = [];
+
+  // Ground: sea level, and the terrain along the meridian through the map center
+  parts.push(`<rect class="sea" x="0" y="${Y(0)}" width="${width}" height="${Math.max(0, height - Y(0))}"/>`);
+  if (profile) {
+    const points = profile.filter(([north]) => north >= x0 - 1000 && north <= x1 + 1000);
+    if (points.length) {
+      const line = points.map(([north, elevation]) => `${X(north)},${Y(elevation)}`).join(' ');
+      parts.push(`<polygon class="ground" points="${X(points[0][0])},${height} ${line} ${X(points.at(-1)[0])},${height}"/>`);
+    }
+  }
+
+  // Grid in km
+  const step = niceStep(x1 - x0, 6);
+  for (let x = Math.ceil(x0 / step) * step; x <= x1; x += step) {
+    parts.push(`<line class="grid" x1="${X(x)}" y1="0" x2="${X(x)}" y2="${height}"/>`,
+      `<text x="${X(x)}" y="${height - 4}" text-anchor="middle">${+(x / 1000).toFixed(3)}</text>`);
+  }
+  for (let y = Math.ceil(y0 / step) * step; y <= y1; y += step) {
+    parts.push(`<line class="grid" x1="0" y1="${Y(y)}" x2="${width}" y2="${Y(y)}"/>`,
+      `<text x="4" y="${Y(y) - 3}">${+(y / 1000).toFixed(3)}</text>`);
+  }
+  parts.push(`<line class="center" x1="${X(0)}" y1="0" x2="${X(0)}" y2="${height}"/>`);
+  const notes = [];
+
+  // Where the camera should aim
+  const ref = reference(zoom);
+  if (Number.isFinite(ref.altitude)) {
+    parts.push(`<circle class="reference" cx="${X(0)}" cy="${Y(ref.altitude)}" r="7"/>`,
+      `<text x="${+X(0) + 11}" y="${+Y(ref.altitude) - 8}">${ref.label}</text>`);
+  } else {
+    notes.push({text: ref.label});
+  }
+
+  // Camera trace in zoom order, with a dot every 0.1 zoom. A step more than 3 times as long as the steps around it is a jump.
+  const samples = [...side.samples.values()].sort((a, b) => a.zoom - b.zoom).map(s => ({zoom: s.zoom, at: toSide(s.camera)}));
+  const steps = samples.slice(1).map((s, i) => Math.hypot(s.at[0] - samples[i].at[0], s.at[1] - samples[i].at[1]));
+  let path = '';
+  const marks = [];
+  samples.forEach((s, i) => {
+    const near = steps.slice(Math.max(0, i - 5), i - 1).concat(steps.slice(i, i + 4)).sort((a, b) => a - b);
+    const typical = near.length ? near[Math.floor(near.length / 2)] : Infinity;
+    const jump = i > 0 && steps[i - 1] > 3 * typical && steps[i - 1] > 20 && s.zoom - samples[i - 1].zoom < 0.011;
+    if (jump) {
+      const [from, to] = [samples[i - 1].at, s.at];
+      marks.push(`<line class="jump" x1="${X(from[0])}" y1="${Y(from[1])}" x2="${X(to[0])}" y2="${Y(to[1])}"/>`,
+        `<circle class="jump-end" cx="${X(from[0])}" cy="${Y(from[1])}" r="3.5"/>`,
+        `<circle class="jump-end" cx="${X(to[0])}" cy="${Y(to[1])}" r="3.5"/>`);
+      notes.push({text: `camera jumps ${km(steps[i - 1])} km from zoom ${samples[i - 1].zoom.toFixed(2)} to ${s.zoom.toFixed(2)}`, className: 'jump-label'});
+    }
+    path += `${i === 0 || jump ? 'M' : 'L'}${X(s.at[0])},${Y(s.at[1])}`;
+    const hundredths = Math.round(s.zoom * 100);
+    if (hundredths % 10 === 0) marks.push(`<circle class="tick" cx="${X(s.at[0])}" cy="${Y(s.at[1])}" r="2"/>`);
+    if (hundredths % 50 === 0) marks.push(`<text x="${+X(s.at[0]) - 6}" y="${+Y(s.at[1]) + 14}" text-anchor="end">z${s.zoom}</text>`);
+  });
+  if (path) parts.push(`<path class="trace" d="${path}"/>`);
+  parts.push(...marks);
+  notes.forEach((note, i) =>
+    parts.push(`<text class="${note.className || ''}" x="${width - 8}" y="${16 + 15 * i}" text-anchor="end">${note.text}</text>`));
+
+  // Current camera, its line of sight to the target, and the target
+  if (side.current) {
+    const camera = toSide(side.current.camera);
+    const target = toSide(side.current.target);
+    parts.push(`<line class="sight" x1="${X(camera[0])}" y1="${Y(camera[1])}" x2="${X(target[0])}" y2="${Y(target[1])}"/>`,
+      `<circle class="camera" cx="${X(camera[0])}" cy="${Y(camera[1])}" r="5"/>`,
+      `<text x="${+X(camera[0]) + 9}" y="${+Y(camera[1]) - 7}">camera</text>`,
+      `<circle class="target" cx="${X(target[0])}" cy="${Y(target[1])}" r="4"/>`,
+      `<text x="${+X(target[0]) - 9}" y="${+Y(target[1]) + 16}" text-anchor="end">target</text>`);
+    const where = ([north, altitude]) =>
+      `${Math.abs(north) < 5 ? 'over the map center' : `${km(north)} km ${north < 0 ? 'south' : 'north'}`}, ${km(altitude)} km up`;
+    side.readout.textContent = `zoom ${side.current.zoom.toFixed(2)}: camera ${where(camera)} | target ${where(target)}`;
+  }
+  side.svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+  side.svg.innerHTML = parts.join('');
+}
+
+// Terrain along the meridian through the map center from Terrarium tiles at zoom 11
+async function loadProfile() {
+  const z = 11;
+  const n = 2 ** z;
+  const tileX = ((centerLng + 180) / 360) * n;
+  const tiles = new Map();
+  const tile = ty => {
+    if (!tiles.has(ty)) {
+      const url = scene.terrarium.replace('{z}', z).replace('{x}', Math.floor(tileX)).replace('{y}', ty);
+      tiles.set(ty, fetch(url).then(response => response.blob()).then(createImageBitmap).then(bitmap => {
+        const context = new OffscreenCanvas(bitmap.width, bitmap.height).getContext('2d');
+        context.drawImage(bitmap, 0, 0);
+        return context.getImageData(0, 0, bitmap.width, bitmap.height);
+      }));
+    }
+    return tiles.get(ty);
+  };
+  const reach = cameraDistance(minZoom, frames[scene.builds[0]].clientHeight || 480);
+  const points = [];
+  for (let i = 0; i <= 800; i++) {
+    const north = -1.6 * reach + (i / 800) * 2.4 * reach;
+    const latRad = (centerLat + (north / EARTH_RADIUS) * (180 / Math.PI)) * (Math.PI / 180);
+    const y = ((1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2) * n;
+    const image = await tile(Math.floor(y));
+    const k = (Math.floor((y % 1) * image.height) * image.width + Math.floor((tileX % 1) * image.width)) * 4;
+    points.push([north, image.data[k] * 256 + image.data[k + 1] + image.data[k + 2] / 256 - 32768]);
+  }
+  profile = points;
+  drawSides();
+}
+if (scene.terrarium) loadProfile();
+window.addEventListener('resize', drawSides);
+
 window.addEventListener('message', event => {
-  const {type, build, offset, what, viewport} = event.data || {};
+  const data = event.data || {};
+  const {type, build, offset, what, viewport} = data;
   if (type === 'readout' && readouts[build]) {
     readouts[build].textContent = [viewport, typeof offset === 'number' ? `${what}: ${offset.toFixed(1)} px` : null]
       .filter(Boolean).join(' | ');
+  }
+  const side = sides[build];
+  if (!side) return;
+  if (type === 'trace') {
+    side.samples = new Map(data.samples.map(sample => [sample.zoom.toFixed(2), sample]));
+    drawSides();
+  } else if ((type === 'readout' || type === 'camera') && data.camera) {
+    const sample = {zoom: data.zoom, camera: data.camera, target: data.target};
+    side.samples.set(data.zoom.toFixed(2), sample);
+    side.current = sample;
+    if (Number.isFinite(data.centerElevation)) centerElevation = data.centerElevation;
+    drawSides();
   }
 });
 

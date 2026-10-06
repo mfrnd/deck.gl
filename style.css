@@ -22,7 +22,26 @@ header p { margin: 0 0 12px; color: var(--muted); max-width: 980px; }
 .panel figcaption.after { color: var(--after); }
 .panel iframe { width: 100%; aspect-ratio: 4 / 3; border: 1px solid var(--line); display: block; }
 .readout { font-variant-numeric: tabular-nums; color: var(--muted); min-height: 1.4em; margin-top: 4px; }
-.controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 14px 0 6px; }
+.side-title { margin-top: 10px; font-size: 13px; font-weight: 600; }
+.side { display: block; box-sizing: border-box; width: 100%; aspect-ratio: 16 / 7; margin-top: 4px; border: 1px solid var(--line); background: #f7fbff; }
+.side text { font: 11px system-ui, -apple-system, Segoe UI, Arial, sans-serif; fill: var(--muted); }
+.side .sea { fill: #e9e4d8; }
+.side .ground { fill: #ddd0b6; stroke: #9e8a6a; stroke-width: 1; }
+.side .grid { stroke: #dfe5ec; stroke-width: 1; }
+.side .center { stroke: #8a8a8a; stroke-width: 1; stroke-dasharray: 4 4; }
+.side .reference { fill: none; stroke: #222; stroke-width: 1.5; }
+.side .trace { fill: none; stroke: #b9cbe8; stroke-width: 6; stroke-linecap: round; stroke-linejoin: round; }
+.side .tick { fill: #1f4e9c; }
+.side .jump { stroke: #c62828; stroke-width: 2.5; stroke-dasharray: 5 4; }
+.side .jump-end { fill: #fff; stroke: #c62828; stroke-width: 1.5; }
+.side .jump-label { fill: #c62828; font-weight: 600; }
+.side .sight { stroke: #1f4e9c; stroke-width: 1.5; }
+.side .camera { fill: #1f4e9c; stroke: #fff; stroke-width: 1.5; }
+.side .target { fill: #c2185b; stroke: #fff; stroke-width: 1.5; }
+.side-readout { font-variant-numeric: tabular-nums; color: var(--muted); min-height: 1.4em; margin-top: 4px; font-size: 13px; }
+/* Stays at the bottom of the window while the panels are taller than it */
+.controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 14px 0 6px; padding: 8px 0;
+  position: sticky; bottom: 0; background: var(--bg); z-index: 1; }
 .controls input[type=range] { flex: 1 1 280px; }
 .controls output { font-variant-numeric: tabular-nums; min-width: 6.5em; }
 .jumps button { margin-right: 4px; }

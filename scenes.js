@@ -33,6 +33,7 @@ export const SCENES = {
     kind: 'maplibre',
     terrarium: TERRARIUM,
     center: ST_HELENS,
+    pitch: 60,
     points: [-0.03, 0, 0.03].flatMap(dx => [-0.02, 0, 0.02].map(dy => [ST_HELENS[0] + dx, ST_HELENS[1] + dy]))
   },
   'terrain-layer': {

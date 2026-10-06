@@ -48,6 +48,30 @@ function colorOffset(gl, canvas, color, tolerance = 14) {
   return [(sx / n + 0.5) / scale - canvas.clientWidth / 2, (sy / n + 0.5) / scale - canvas.clientHeight / 2];
 }
 
+// Camera and target of a viewport in [lng, lat, meters], for the side views in compare.html
+function cameraOf(viewport) {
+  return {
+    camera: Array.from(viewport.unprojectPosition(viewport.cameraPosition)),
+    target: Array.from(viewport.unprojectPosition(viewport.center))
+  };
+}
+
+// The camera at every zoom step of the scene, from the same view and size as the rendered viewport
+let tracedSize = '';
+function postTrace(view, viewport) {
+  const size = `${viewport.width}x${viewport.height}`;
+  if (size === tracedSize) return;
+  tracedSize = size;
+  const [minZoom, maxZoom] = scene.zoom;
+  const samples = [];
+  for (let i = 0; minZoom + i / 100 <= maxZoom + 1e-9; i++) {
+    const stepZoom = Math.round((minZoom + i / 100) * 100) / 100;
+    const stepViewport = view.makeViewport({width: viewport.width, height: viewport.height, viewState: scene.viewState(stepZoom)});
+    samples.push({zoom: stepZoom, ...cameraOf(stepViewport)});
+  }
+  parent.postMessage({type: 'trace', build, samples}, '*');
+}
+
 async function elevationAt(lng, lat, z = 12) {
   // Terrarium tile pixel: (r * 256 + g + b / 256) - 32768 meters
   const n = 2 ** z;
@@ -76,15 +100,18 @@ async function deckScene() {
       getFillColor: DOT, stroked: true, getLineColor: [255, 255, 255], lineWidthUnits: 'pixels', getLineWidth: 2,
       billboard: true, parameters: {depthCompare: 'always', depthWriteEnabled: false}})
   ].filter(Boolean);
+  const view = new GlobeView({id: 'globe'});
   const deck = new Deck({
-    parent: document.getElementById('map'), views: new GlobeView({id: 'globe'}), viewState: scene.viewState(zoom), layers,
+    parent: document.getElementById('map'), views: view, viewState: scene.viewState(zoom), layers,
     controller: false, deviceProps: {type: 'webgl', webgl: {preserveDrawingBuffer: true}},
     onAfterRender: () => {
       const gl = deck.device && deck.device.gl;
       if (!gl) return;
       const offset = colorOffset(gl, deck.getCanvas(), DOT);
+      const viewport = deck.getViewports()[0];
+      postTrace(view, viewport);
       report({offset: offset && Math.hypot(...offset), what: 'dot off the crosshair',
-        viewport: zoom > 12 ? 'WebMercatorViewport' : 'GlobeViewport'});
+        viewport: zoom > 12 ? 'WebMercatorViewport' : 'GlobeViewport', ...cameraOf(viewport)});
     }
   });
   update = () => deck.setProps({viewState: scene.viewState(zoom)});
@@ -94,8 +121,9 @@ async function terrainScene() {
   const {Deck, MapView, TerrainLayer, ScatterplotLayer} = window.deck;
   const heights = await Promise.all(scene.markers.map(([lng, lat]) => elevationAt(lng, lat)));
   const markers = scene.markers.map(([lng, lat], i) => [lng, lat, heights[i]]);
+  const view = new MapView({id: 'map'});
   const deck = new Deck({
-    parent: document.getElementById('map'), views: new MapView({id: 'map'}), viewState: scene.viewState(zoom), controller: false,
+    parent: document.getElementById('map'), views: view, viewState: scene.viewState(zoom), controller: false,
     layers: [
       new TerrainLayer({id: 'terrain', elevationData: scene.terrarium, maxZoom: 12, color: [215, 215, 215],
         elevationDecoder: {rScaler: 256, gScaler: 1, bScaler: 1 / 256, offset: -32768}}),
@@ -103,7 +131,11 @@ async function terrainScene() {
         getFillColor: PINK, stroked: true, getLineColor: [255, 255, 255], lineWidthUnits: 'pixels', getLineWidth: 2,
         billboard: true, parameters: {depthCompare: 'always', depthWriteEnabled: false}})
     ],
-    onAfterRender: () => report({viewport: zoom < 12 ? 'below 12: WEB_MERCATOR' : '12 and up: WEB_MERCATOR_AUTO_OFFSET'})
+    onAfterRender: () => {
+      const viewport = deck.getViewports()[0];
+      postTrace(view, viewport);
+      report({viewport: zoom < 12 ? 'below 12: WEB_MERCATOR' : '12 and up: WEB_MERCATOR_AUTO_OFFSET', ...cameraOf(viewport)});
+    }
   });
   update = () => deck.setProps({viewState: scene.viewState(zoom)});
 }
@@ -130,7 +162,7 @@ async function maplibreScene() {
       ],
       terrain: {source: 'dem', exaggeration: 1}
     },
-    center: scene.center, zoom, pitch: 60, bearing: 0, attributionControl: false, interactive: false
+    center: scene.center, zoom, pitch: scene.pitch, bearing: 0, attributionControl: false, interactive: false
   });
   await new Promise(resolve => map.once('load', resolve));
   const overlay = new MapLibreOverlay({interleaved: true, layers: []});
@@ -142,6 +174,14 @@ async function maplibreScene() {
     report({viewport: zoom > 12 ? 'deck.gl: WebMercatorViewport' : 'deck.gl: GlobeViewport'});
   };
   map.on('idle', sync);
+  // The overlay's camera depends on MapLibre's state, so the side view collects it as the map renders
+  map.on('render', () => {
+    const viewport = overlay._deck && overlay._deck.getViewports()[0];
+    if (viewport) {
+      parent.postMessage({type: 'camera', build, zoom: Math.round(map.getZoom() * 100) / 100,
+        centerElevation: map.getCenterElevation(), ...cameraOf(viewport)}, '*');
+    }
+  });
   update = () => map.jumpTo({zoom});
 }
 
