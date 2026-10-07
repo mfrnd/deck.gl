@@ -15,12 +15,22 @@ export const SCENES = {
     title: 'GlobeView with viewState.position, no base map, looking straight down',
     description:
       'position = [0, 0, 2000] puts the camera target 2,000 m above the map center (red dot, on a mast from the ground). ' +
-      'It belongs on the crosshair. GlobeView switches from GlobeViewport to WebMercatorViewport above zoom 12.',
+      'It belongs on the crosshair. GlobeView switches from GlobeViewport to WebMercatorViewport above zoom 12. ' +
+      'How far off master is depends on where the map is: near the North Pole it is almost right.',
     builds: ['master', 'pr2'],
     zoom: [11.5, 12.5, 11.95],
     kind: 'deck',
-    viewState: zoom => ({longitude: ST_HELENS[0], latitude: ST_HELENS[1], zoom, pitch: 0, bearing: 0, position: [0, 0, 2000]}),
+    // ?at= picks one, the first is the default
+    locations: {
+      'st-helens': {name: 'Mount St. Helens, 46.2° N', center: ST_HELENS},
+      equator: {name: 'the equator', center: [ST_HELENS[0], 0]},
+      south: {name: '46.2° S', center: [ST_HELENS[0], -46.2]},
+      'north-pole': {name: '89.5° N, near the North Pole', center: [0, 89.5]}
+    },
+    viewState: (zoom, [longitude, latitude] = ST_HELENS) =>
+      ({longitude, latitude, zoom, pitch: 0, bearing: 0, position: [0, 0, 2000]}),
     marker: {position: [ST_HELENS[0], ST_HELENS[1], 2000], mast: true},
+    squareGrid: true,
     globe: true
   },
   'maplibre-globe-terrain': {
@@ -80,15 +90,32 @@ export const SCENES = {
   }
 };
 
-// Grid lines split into short segments: on the globe a long straight segment is a chord below the ground
-export function grid(longitude, latitude) {
+// The scene at one of its locations (?at=, else the first one), or the scene itself
+export function sceneAt(scene, at) {
+  if (!scene.locations) return scene;
+  const key = at in scene.locations ? at : Object.keys(scene.locations)[0];
+  const {name, center} = scene.locations[key];
+  return {
+    ...scene,
+    at: key,
+    title: `${scene.title}, at ${name}`,
+    viewState: zoom => scene.viewState(zoom, center),
+    marker: {...scene.marker, position: [...center, scene.marker.position[2]]}
+  };
+}
+
+// Grid lines split into short segments: on the globe a long straight segment is a chord below the ground.
+// With square, the cells are about as wide as they are high, also near the poles.
+export function grid(longitude, latitude, square = false) {
   const paths = [];
+  const lngStep = square ? 0.01 / Math.max(Math.cos((latitude * Math.PI) / 180), 0.01) : 0.01;
+  const clamp = lat => Math.max(-89.99, Math.min(89.99, lat));
   const line = (from, to, steps = 60) =>
     Array.from({length: steps + 1}, (_, k) => [from[0] + ((to[0] - from[0]) * k) / steps, from[1] + ((to[1] - from[1]) * k) / steps]);
   for (let i = -30; i <= 30; i++) {
     const major = i % 5 === 0;
-    paths.push({path: line([longitude + i * 0.01, latitude - 0.3], [longitude + i * 0.01, latitude + 0.3]), major});
-    paths.push({path: line([longitude - 0.3, latitude + i * 0.01], [longitude + 0.3, latitude + i * 0.01]), major});
+    paths.push({path: line([longitude + i * lngStep, clamp(latitude - 0.3)], [longitude + i * lngStep, clamp(latitude + 0.3)]), major});
+    paths.push({path: line([longitude - 30 * lngStep, clamp(latitude + i * 0.01)], [longitude + 30 * lngStep, clamp(latitude + i * 0.01)]), major});
   }
   return paths;
 }

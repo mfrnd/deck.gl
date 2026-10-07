@@ -12,10 +12,10 @@
 </style></head>
 <body><div id="map"></div>
 <script type="module">
-import {SCENES, grid} from './scenes.js';
+import {SCENES, grid, sceneAt} from './scenes.js';
 
 const params = new URLSearchParams(location.search);
-const scene = SCENES[params.get('scene')];
+const scene = sceneAt(SCENES[params.get('scene')], params.get('at'));
 const build = params.get('build');
 const DOT = [220, 20, 60];
 const PINK = [255, 0, 170];
@@ -93,7 +93,7 @@ async function deckScene() {
   const [lng, lat, height] = scene.marker.position;
   const crosshair = document.createElement('div'); crosshair.className = 'crosshair'; document.body.append(crosshair);
   const layers = [
-    new PathLayer({id: 'grid', data: grid(lng, lat), getPath: d => d.path, widthUnits: 'pixels',
+    new PathLayer({id: 'grid', data: grid(lng, lat, scene.squareGrid), getPath: d => d.path, widthUnits: 'pixels',
       getWidth: d => (d.major ? 2 : 1), getColor: d => (d.major ? [110, 110, 110] : [185, 185, 185])}),
     scene.marker.mast && new PathLayer({id: 'mast', data: [0], getPath: () => [[lng, lat, 0], [lng, lat, height]],
       widthUnits: 'pixels', getWidth: 3, getColor: [200, 40, 40], billboard: true}),
