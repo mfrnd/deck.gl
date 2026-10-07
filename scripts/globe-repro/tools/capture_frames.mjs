@@ -120,7 +120,9 @@ try {
       });
       const images = [...document.querySelectorAll('.stage img')].every(image =>
         image.getAttribute('src').endsWith('/${Math.round(zoom * 100)}.webp') && image.complete && image.naturalWidth > 0);
-      return views && images;
+      // Measured terrain is compared with the elevation profile once that has loaded
+      const ratios = !measuring || [...document.querySelectorAll('.side-readout')].every(e => e.textContent.includes('% of the elevation data'));
+      return views && images && ratios;
     })()`, timeout);
     if (!ready) console.warn(`zoom ${zoom}: not settled after ${timeout} ms`);
     // Let the side views draw

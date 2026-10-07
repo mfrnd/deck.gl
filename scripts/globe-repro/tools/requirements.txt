@@ -1,4 +1,4 @@
-# for make_gif.py, make_demo.py and make_demo_2x2.py
+# for make_gif.py, make_demo.py, make_demo_2x2.py and frames_to_gif.py (pillow)
 numpy
 pillow
 imageio-ffmpeg
