@@ -138,7 +138,8 @@ try {
     const {data} = await send('Page.captureScreenshot', {format: 'png', clip});
     const file = `${String(index).padStart(3, '0')}.png`;
     writeFileSync(join(args.out, file), Buffer.from(data, 'base64'));
-    frames.push({file, zoom, settled: ready});
+    const readouts = await evaluate("[...document.querySelectorAll('.readout, .side-readout')].map(e => e.textContent)");
+    frames.push({file, zoom, settled: ready, readouts});
     process.stdout.write(`\r${index + 1}/${zooms.length} zoom ${zoom.toFixed(2)}   `);
   }
   writeFileSync(join(args.out, 'frames.json'), JSON.stringify({url: args.url, title, frames}, null, 1));
