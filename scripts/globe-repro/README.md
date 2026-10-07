@@ -8,7 +8,7 @@ Side-by-side comparisons of deck.gl builds around zoom 12, where `GlobeView` swi
 
 | Page | Builds | What to look for |
 |---|---|---|
-| GlobeView with `viewState.position`, no base map, looking straight down | master vs camera fix | The red dot (2,000 m above the map center, where `position` puts the camera target) belongs on the crosshair. On master it is off below zoom 12 and jumps at 12. |
+| GlobeView with `viewState.position`, no base map, looking straight down | master vs camera fix | The red dot (2,000 m above the map center, where `position` puts the camera target) belongs on the crosshair. On master it is off below zoom 12 and jumps at 12, by an amount that depends on the location (`&at=st-helens`, `equator`, `south`, `north-pole`). |
 | `MapLibreOverlay` on MapLibre's globe with terrain | master vs camera fix | Pink deck.gl points belong inside MapLibre's cyan circles. |
 | `TerrainLayer` on a `MapView` | master vs cartesian z fix | Pink markers at their DEM elevation belong on the terrain. On master the terrain is too flat below zoom 12 and pops up at 12. |
 | GlobeView alone near Zurich | master live on the GPU vs master and master + `patches/globe-sincos.patch` recorded with SwiftShader | The red dot belongs on the crosshair. Software rendering's inaccurate `sin`/`cos` move it on master, up to 46 px at zoom 12. |
