@@ -12,14 +12,14 @@ const ST_HELENS = [-122.19, 46.2];
 
 export const SCENES = {
   'globe-position': {
-    title: 'GlobeView with viewState.position, no base map',
+    title: 'GlobeView with viewState.position, no base map, looking straight down',
     description:
-      'position = [0, 0, 2000] puts the camera target 2,000 m above the map center (red dot). ' +
+      'position = [0, 0, 2000] puts the camera target 2,000 m above the map center (red dot, on a mast from the ground). ' +
       'It belongs on the crosshair. GlobeView switches from GlobeViewport to WebMercatorViewport above zoom 12.',
     builds: ['master', 'pr2'],
     zoom: [11.5, 12.5, 11.95],
     kind: 'deck',
-    viewState: zoom => ({longitude: ST_HELENS[0], latitude: ST_HELENS[1], zoom, pitch: 60, bearing: 0, position: [0, 0, 2000]}),
+    viewState: zoom => ({longitude: ST_HELENS[0], latitude: ST_HELENS[1], zoom, pitch: 0, bearing: 0, position: [0, 0, 2000]}),
     marker: {position: [ST_HELENS[0], ST_HELENS[1], 2000], mast: true},
     globe: true
   },
