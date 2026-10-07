@@ -17,6 +17,7 @@
   <span class="jumps">
     <button data-zoom="11.99">11.99</button><button data-zoom="12">12.00</button><button data-zoom="12.01">12.01</button>
   </span>
+  <label id="placeLabel" hidden>Location <select id="place"></select></label>
   <label id="measureLabel" hidden><input id="measure" type="checkbox"> <span class="measure-name">Measured terrain</span> (compute intensive)</label>
 </section>
 <p class="note">Zoom 12: GlobeView switches from GlobeViewport to WebMercatorViewport, and deck.gl's flat projection switches
@@ -26,11 +27,11 @@
   build draws, picked with <code>unproject3D</code> along the center column of its view, in orange over the elevation
   data.</span> Renderer of this browser: <span id="renderer"></span><span id="recordedNote"></span></p>
 <script type="module">
-import {BUILDS, SCENES} from './scenes.js';
+import {BUILDS, SCENES, sceneAt} from './scenes.js';
 
 const params = new URLSearchParams(location.search);
 const sceneId = params.get('scene') in SCENES ? params.get('scene') : 'globe-position';
-const scene = SCENES[sceneId];
+const scene = sceneAt(SCENES[sceneId], params.get('at'));
 const [minZoom, maxZoom] = scene.zoom;
 const startZoom = Math.min(Math.max(Number(params.get('zoom')) || scene.zoom[2], minZoom), maxZoom);
 document.title = scene.title;
@@ -52,7 +53,7 @@ container.classList.toggle('three', panels.length === 3);
 for (const panel of panels) {
   const figure = document.createElement('figure');
   figure.className = 'panel';
-  const src = `view.html?scene=${sceneId}&build=${panel.build}&zoom=${startZoom}`;
+  const src = `view.html?scene=${sceneId}&build=${panel.build}&zoom=${startZoom}${scene.at ? `&at=${scene.at}` : ''}`;
   const media = panel.recording
     ? `<div class="stage"><img alt="${panel.label}"><div class="crosshair"></div></div>`
     : SIZE
@@ -125,6 +126,19 @@ for (const panel of recorded) {
     .catch(() => {
       panel.readout.textContent = 'No recording in this copy of the site (see tools/record.html)';
     });
+}
+
+// Locations of the scene: another one reloads the page there, at the same zoom
+if (scene.locations) {
+  const select = document.getElementById('place');
+  for (const [key, {name}] of Object.entries(scene.locations)) select.append(new Option(name, key, false, key === scene.at));
+  document.getElementById('placeLabel').hidden = false;
+  select.addEventListener('change', () => {
+    const next = new URLSearchParams(location.search);
+    next.set('at', select.value);
+    next.set('zoom', slider.value);
+    location.search = next.toString();
+  });
 }
 
 // Measured terrain: each live build picks the surface it draws, see view.html
@@ -202,7 +216,9 @@ function drawSides() {
     const pitch = (sceneView.pitch * Math.PI) / 180;
     const targetAltitude = scene.kind === 'maplibre' ? centerElevation || 0 : positionHeight;
     const camera = [-distance * Math.sin(pitch), targetAltitude + distance * Math.cos(pitch)];
-    const box = [Math.min(camera[0], 0) - 0.25 * distance, Math.min(0, targetAltitude) - 0.12 * distance,
+    // Down to the lowest target of the traces, which may be below sea level
+    const lowest = Math.min(0, targetAltitude, ...panels.flatMap(panel => [...panel.samples.values()].map(sample => sample.target[2])));
+    const box = [Math.min(camera[0], 0) - 0.25 * distance, lowest - 0.12 * distance,
       Math.max(camera[0], 0) + 0.3 * distance, camera[1] + 0.22 * distance];
     const scale = Math.min(width / (box[2] - box[0]), height / (box[3] - box[1]));
     const [cx, cy] = [(box[0] + box[2]) / 2, (box[1] + box[3]) / 2];
@@ -293,7 +309,8 @@ function drawSide(side, {width, height, extent, X, Y, zoom}) {
       `<circle class="target" cx="${X(target[0])}" cy="${Y(target[1])}" r="4"/>`,
       `<text x="${+X(target[0]) - 9}" y="${+Y(target[1]) + 16}" text-anchor="end">target</text>`);
     const where = ([north, altitude]) =>
-      `${Math.abs(north) < 5 ? 'over the map center' : `${km(north)} km ${north < 0 ? 'south' : 'north'}`}, ${km(altitude)} km up`;
+      `${Math.abs(north) < 5 ? 'over the map center' : `${km(north)} km ${north < 0 ? 'south' : 'north'}`}, ` +
+      `${km(altitude)} km ${altitude < -5 ? 'below sea level' : 'up'}`;
     let text = `zoom ${side.current.zoom.toFixed(2)}: camera ${where(camera)} | target ${where(target)}`;
     // Drawn height over the elevation data at the same places, above 500 m where the ratio is meaningful
     const ratios = (surface && profile ? surface : [])
