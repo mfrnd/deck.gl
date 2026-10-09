@@ -1,0 +1,364 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TerrainLayer picking panel</title>
+<style>
+  :root {
+    --hit: #34d27b;
+    --miss: #ff5a5a;
+    --ink: #f3f4f6;
+    --muted: #a7afbb;
+    --glass: rgba(10, 12, 16, 0.84);
+  }
+  html, body {
+    margin: 0;
+    height: 100%;
+    overflow: hidden;
+    background: #20252c;
+    color: var(--ink);
+    font: 13px/1.4 "Segoe UI", system-ui, sans-serif;
+  }
+  #map, #grid, #marks { position: absolute; inset: 0; }
+  #grid, #marks { pointer-events: none; }
+  .box {
+    position: absolute;
+    background: var(--glass);
+    border-radius: 6px;
+    padding: 8px 10px;
+    pointer-events: none;
+  }
+  #hud { left: 10px; bottom: 10px; min-width: 318px; font-variant-numeric: tabular-nums; }
+  #hud table { border-collapse: collapse; }
+  #hud td { padding: 1px 0; vertical-align: top; }
+  #hud td:first-child { color: var(--muted); padding-right: 14px; white-space: nowrap; }
+  #hud td:last-child { font-weight: 600; }
+  #log {
+    right: 10px;
+    top: 10px;
+    width: 372px;
+    font: 11.5px/1.45 Consolas, "Cascadia Mono", monospace;
+    color: var(--muted);
+  }
+  #log div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #log b { color: var(--ink); font-weight: 400; }
+  .ok { color: var(--hit) !important; }
+  .bad { color: var(--miss) !important; }
+  .t { display: inline-block; width: 52px; color: #7d8592; }
+  .ripple {
+    position: absolute;
+    width: 18px;
+    height: 18px;
+    margin: -11px 0 0 -11px;
+    border: 2px solid #fff;
+    border-radius: 50%;
+    animation: ripple 0.7s ease-out forwards;
+  }
+  @keyframes ripple {
+    from { transform: scale(0.4); opacity: 1; }
+    to { transform: scale(3.2); opacity: 0; }
+  }
+  .mark { position: absolute; transform: translate(-50%, -50%); }
+  .mark .dot {
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    border: 2px solid #fff;
+    box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.6);
+  }
+  .mark.hit .dot { background: var(--hit); }
+  .mark.miss .dot { background: var(--miss); }
+  .mark .label {
+    position: absolute;
+    left: 14px;
+    top: -8px;
+    white-space: nowrap;
+    font-weight: 600;
+    font-size: 12.5px;
+    padding: 1px 6px;
+    border-radius: 4px;
+    background: var(--glass);
+  }
+  .mark.hit .label { color: var(--hit); }
+  .mark.miss .label { color: var(--miss); }
+  #cursor {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 22px;
+    height: 22px;
+    display: none;
+    pointer-events: none;
+    filter: drop-shadow(0 1px 1.5px rgba(0, 0, 0, 0.7));
+  }
+  /* The pointer of the other panel, in the live page */
+  #cursor.ghost { opacity: 0.6; }
+  @media (max-width: 560px) {
+    #log { width: auto; left: 10px; font-size: 10px; }
+    #log div:nth-last-child(n + 6) { display: none; }
+    #hud { min-width: 0; font-size: 11.5px; }
+  }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<canvas id="grid"></canvas>
+<div id="marks"></div>
+<div class="box" id="log"></div>
+<div class="box" id="hud"></div>
+<svg id="cursor" viewBox="0 0 22 22"><path d="M2 1 L2 17 L6.2 13.2 L9 19.5 L11.6 18.4 L8.9 12.2 L14.5 12.2 Z" fill="#fff" stroke="#111" stroke-width="1.3" stroke-linejoin="round"/></svg>
+<script type="module">
+// One deck.gl build (?build=<name>, bundles/deck-<name>.js) with a TerrainLayer at Mount St. Helens. The recorder
+// drives it with real input and this page draws the pointer, the clicks and what each build picked. In the live page
+// (&live=1), index.html scripts the zoom, and the clicks, pointer and view of one panel are repeated in the other.
+// &v=<key> is added to the tile URLs so that the first tiles load fresh.
+const params = new URLSearchParams(location.search);
+const build = params.get('build');
+const live = params.get('live') === '1';
+const cacheKey = params.get('v');
+const TERRARIUM = `https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png${cacheKey ? `?v=${encodeURIComponent(cacheKey)}` : ''}`;
+const VIEW = {longitude: -122.18, latitude: 46.215, zoom: 11, pitch: 60, bearing: -15};
+
+const fixture = (window.fixture = {build, live, ready: false, events: [], clicks: [], grid: null, start: null});
+// Tells index.html about input in this panel (live page only)
+const report = (type, data) => live && window.parent.panelEvent && window.parent.panelEvent(build, type, data);
+const $ = id => document.getElementById(id);
+const fmtRange = r => (r ? `[${Math.round(r[0])}, ${Math.round(r[1])}] m` : 'null');
+const seconds = () => (fixture.start === null ? 0 : (performance.now() - fixture.start) / 1000);
+
+function log(html, kind = '') {
+  const last = fixture.events[fixture.events.length - 1];
+  if (last && last.html === html) {
+    last.count++;
+  } else {
+    fixture.events.push({t: seconds(), html, kind, count: 1});
+  }
+  $('log').innerHTML = fixture.events
+    .slice(-9)
+    .map(e => `<div class="${e.kind}"><span class="t">${e.t.toFixed(2)} s</span>${e.html}${e.count > 1 ? ` ×${e.count}` : ''}</div>`)
+    .join('');
+}
+fixture.log = log;
+
+// The pointer: headless screenshots have none, so draw it where the input events land. In the live page the
+// browser draws it, and the other panel draws it as a ghost.
+window.addEventListener('pointermove', e => {
+  if (live) report('pointer', {fx: e.clientX / innerWidth, fy: e.clientY / innerHeight});
+  else moveCursor(e.clientX, e.clientY);
+}, true);
+window.addEventListener('pointerleave', () => report('pointer', null));
+window.addEventListener('pointerdown', e => {
+  if (!live) moveCursor(e.clientX, e.clientY);
+  ripple(e.clientX, e.clientY);
+}, true);
+function ripple(x, y) {
+  const element = document.createElement('div');
+  element.className = 'ripple';
+  element.style.left = `${x}px`;
+  element.style.top = `${y}px`;
+  $('marks').append(element);
+  setTimeout(() => element.remove(), 800);
+}
+function moveCursor(x, y) {
+  const cursor = $('cursor');
+  cursor.style.display = 'block';
+  cursor.style.transform = `translate(${x - 2}px, ${y - 1}px)`;
+}
+fixture.ghost = at => {
+  const cursor = $('cursor');
+  cursor.classList.add('ghost');
+  if (at) moveCursor(at.fx * innerWidth, at.fy * innerHeight);
+  else cursor.style.display = 'none';
+};
+
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    script.src = src;
+    script.onload = resolve;
+    script.onerror = () => reject(new Error(`cannot load ${src}`));
+    document.head.append(script);
+  });
+}
+
+await loadScript(`bundles/deck-${build}.js`);
+const {Deck, MapView, TerrainLayer} = window.deckBuild;
+
+// Logs the two steps that matter: the TileLayer reports its loaded tiles (onViewportLoad stores their elevation
+// range with setState) and TerrainLayer renders its TileLayer, passing that range as zRange
+class LoggedTerrainLayer extends TerrainLayer {
+  onViewportLoad(tiles) {
+    const before = this.state.zRange;
+    super.onViewportLoad(tiles);
+    if (this.state.zRange !== before) {
+      log(`onViewportLoad → <b>setState({zRange: ${fmtRange(this.state.zRange)}})</b>`);
+    }
+  }
+  renderLayers() {
+    const layer = super.renderLayers();
+    const zRange = layer && layer.props.zRange;
+    log(`renderLayers → <b>TileLayer zRange ${fmtRange(zRange)}</b>`, zRange ? 'ok' : 'bad');
+    return layer;
+  }
+}
+LoggedTerrainLayer.layerName = 'TerrainLayer';
+
+const deck = new Deck({
+  parent: $('map'),
+  views: new MapView({repeat: false}),
+  initialViewState: VIEW,
+  controller: {inertia: false, dragRotate: false, touchRotate: false, keyboard: false},
+  getCursor: live ? ({isDragging}) => (isDragging ? 'grabbing' : 'crosshair') : () => 'none',
+  onViewStateChange: ({viewState}) => {
+    report('view', viewState);
+    return viewState;
+  },
+  layers: [
+    new LoggedTerrainLayer({
+      id: 'terrain',
+      elevationData: TERRARIUM,
+      elevationDecoder: {rScaler: 256, gScaler: 1, bScaler: 1 / 256, offset: -32768},
+      maxZoom: 12,
+      color: [222, 214, 200],
+      pickable: true
+    })
+  ],
+  onClick: info => {
+    onClick(info);
+    report('click', {fx: info.x / innerWidth, fy: info.y / innerHeight});
+  }
+});
+fixture.deck = deck;
+fixture.start = performance.now();
+log('new Deck(...)');
+
+function layers() {
+  const all = deck.layerManager ? deck.layerManager.getLayers() : [];
+  return {terrain: all.find(l => l.id === 'terrain'), tiles: all.find(l => l.id === 'terrain-tiles')};
+}
+
+fixture.status = () => {
+  const {terrain, tiles} = layers();
+  const tileset = tiles && tiles.state.tileset;
+  const selected = (tileset && tileset.selectedTiles) || [];
+  return {
+    ready: Boolean(terrain && tiles),
+    selected: selected.length,
+    loaded: selected.filter(t => t.isLoaded).length,
+    isLoaded: Boolean(tileset && tileset.isLoaded),
+    terrainZRange: (terrain && terrain.state.zRange) || null,
+    tileZRange: (tiles && tiles.props.zRange) || null,
+    // TerrainLayer asked for an update (setState) but the LayerManager has none scheduled
+    pending: Boolean(terrain && terrain.internalState && terrain.internalState.needsUpdate) && !deck.layerManager.needsUpdate(),
+    events: fixture.events.length,
+    zoom: deck.viewManager && deck.getViewports()[0] ? deck.getViewports()[0].zoom : null
+  };
+};
+
+// The live page repeats a click of the other panel here, at the same place
+fixture.clickAt = ({fx, fy}) => {
+  const x = fx * innerWidth;
+  const y = fy * innerHeight;
+  ripple(x, y);
+  onClick({x, y, picked: Boolean(deck.pickObject({x, y, radius: 0}))});
+};
+
+// Sets the view, e.g. the scripted zoom or the view of the other panel
+fixture.setView = ({longitude, latitude, zoom, pitch, bearing}) => {
+  deck.setProps({initialViewState: {longitude, latitude, zoom, pitch, bearing}});
+};
+fixture.view = () => {
+  const viewport = deck.getViewports()[0];
+  return viewport && {longitude: viewport.longitude, latitude: viewport.latitude, zoom: viewport.zoom, pitch: viewport.pitch, bearing: viewport.bearing};
+};
+
+function onClick(info) {
+  const hit = Boolean(info.picked);
+  let elevation = null;
+  if (hit) {
+    // The click's own pick says hit or miss; this second pick only reads the height of the surface
+    const picked = deck.pickObject({x: info.x, y: info.y, radius: 0, unproject3D: true});
+    elevation = picked && picked.coordinate ? picked.coordinate[2] : null;
+  }
+  const n = fixture.clicks.length + 1;
+  fixture.clicks.push({x: info.x, y: info.y, hit, elevation});
+  const mark = document.createElement('div');
+  mark.className = `mark ${hit ? 'hit' : 'miss'}`;
+  mark.style.left = `${info.x}px`;
+  mark.style.top = `${info.y}px`;
+  const text = hit ? `${n} · picked${elevation !== null ? ` at ${Math.round(elevation).toLocaleString('en-US')} m` : ''}` : `${n} · nothing picked`;
+  mark.innerHTML = `<div class="dot"></div><div class="label">${text}</div>`;
+  $('marks').append(mark);
+  log(`click ${n} → ${hit ? '<b class="ok">TerrainLayer picked</b>' : '<b class="bad">nothing picked</b>'}`, hit ? 'ok' : 'bad');
+}
+
+// Picks a grid of points with deck.pickObject, one row per frame, and draws them
+fixture.pickGrid = ({cols, rows, top, bottom}) =>
+  new Promise(resolve => {
+    const canvas = $('grid');
+    const ratio = window.devicePixelRatio || 1;
+    canvas.width = innerWidth * ratio;
+    canvas.height = innerHeight * ratio;
+    const ctx = canvas.getContext('2d');
+    ctx.scale(ratio, ratio);
+    fixture.grid = {hits: 0, total: 0};
+    let row = 0;
+    const step = () => {
+      for (let col = 0; col < cols; col++) {
+        const x = ((col + 0.5) / cols) * innerWidth;
+        const y = (top + ((row + 0.5) / rows) * (bottom - top)) * innerHeight;
+        const hit = Boolean(deck.pickObject({x, y, radius: 0}));
+        fixture.grid.total++;
+        if (hit) fixture.grid.hits++;
+        ctx.beginPath();
+        ctx.arc(x, y, 3.2, 0, Math.PI * 2);
+        ctx.fillStyle = hit ? 'rgba(52, 210, 123, 0.95)' : 'rgba(255, 90, 90, 0.95)';
+        ctx.fill();
+        ctx.lineWidth = 0.8;
+        ctx.strokeStyle = 'rgba(0, 0, 0, 0.55)';
+        ctx.stroke();
+      }
+      row++;
+      if (row < rows) requestAnimationFrame(step);
+      else {
+        log(`grid → <b>${fixture.grid.hits} of ${fixture.grid.total} picked</b>`, fixture.grid.hits === fixture.grid.total ? 'ok' : 'bad');
+        resolve(fixture.grid);
+      }
+    };
+    requestAnimationFrame(step);
+  });
+
+fixture.clearGrid = () => {
+  const canvas = $('grid');
+  canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
+  fixture.grid = null;
+};
+
+// Clicks and the grid belong to the view they were picked in
+fixture.resetPicks = () => {
+  fixture.clearGrid();
+  fixture.clicks = [];
+  for (const mark of document.querySelectorAll('.mark')) mark.remove();
+};
+
+// The heads-up display reads the layers' state every frame
+function drawHud() {
+  const s = fixture.status();
+  const hits = fixture.clicks.filter(c => c.hit).length;
+  const rows = [
+    ['TerrainLayer state.zRange', fmtRange(s.terrainZRange), ''],
+    ['TileLayer props.zRange', fmtRange(s.tileZRange), s.terrainZRange ? (s.tileZRange ? 'ok' : 'bad') : ''],
+    ['TerrainLayer update pending', s.pending ? 'yes, but none scheduled' : 'no', s.pending ? 'bad' : ''],
+    ['Tiles loaded', `${s.loaded} of ${s.selected}`, ''],
+    ['Clicks that picked', fixture.clicks.length ? `${hits} of ${fixture.clicks.length}` : '–', fixture.clicks.length ? (hits === fixture.clicks.length ? 'ok' : 'bad') : ''],
+    ['Grid points that picked', fixture.grid ? `${fixture.grid.hits} of ${fixture.grid.total}` : '–', fixture.grid ? (fixture.grid.hits === fixture.grid.total ? 'ok' : 'bad') : '']
+  ];
+  $('hud').innerHTML = `<table>${rows.map(([k, v, c]) => `<tr><td>${k}</td><td class="${c}">${v}</td></tr>`).join('')}</table>`;
+  requestAnimationFrame(drawHud);
+}
+fixture.ready = true;
+drawHud();
+</script>
+</body>
+</html>

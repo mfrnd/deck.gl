@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TerrainLayer Picking</title>
+<style>
+  :root {
+    --bg: #12151a;
+    --ink: #f3f4f6;
+    --muted: #a7afbb;
+    --hit: #34d27b;
+    --miss: #ff5a5a;
+    --line: #2c323b;
+    --link: #8ab4ff;
+    color-scheme: dark;
+  }
+  html, body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.4 "Segoe UI", system-ui, sans-serif; }
+  body { padding: 14px 16px 0; box-sizing: border-box; }
+  h1 { margin: 0; font-size: 21px; font-weight: 650; letter-spacing: 0.1px; }
+  .sub { margin: 3px 0 10px; color: var(--muted); font-size: 13.5px; }
+  a { color: var(--link); }
+  .controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin: 0 0 10px; }
+  button {
+    font: inherit;
+    color: var(--ink);
+    background: #232830;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 4px 12px;
+    cursor: pointer;
+  }
+  button:hover:not(:disabled) { border-color: var(--muted); }
+  button:disabled { opacity: 0.45; cursor: default; }
+  label { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); cursor: pointer; }
+  #panels { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .panel { min-width: 0; }
+  .name { display: flex; align-items: baseline; gap: 8px; margin-bottom: 5px; font-weight: 600; font-size: 15px; }
+  .name span { color: var(--muted); font-weight: 400; font-size: 13px; }
+  .badge { width: 10px; height: 10px; border-radius: 50%; display: inline-block; align-self: center; flex: none; }
+  iframe { display: block; width: 100%; height: 662px; border: 1px solid var(--line); border-radius: 6px; box-sizing: border-box; }
+  /* Input waits for the scripted zoom and the tiles */
+  body.waiting iframe { pointer-events: none; }
+  #caption {
+    margin-top: 10px;
+    min-height: 44px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 17px;
+    font-weight: 600;
+  }
+  #caption .step {
+    flex: none;
+    background: var(--ink);
+    color: var(--bg);
+    border-radius: 50%;
+    width: 28px;
+    height: 28px;
+    display: grid;
+    place-items: center;
+    font-size: 15px;
+  }
+  #caption .detail { color: var(--muted); font-weight: 400; font-size: 14px; }
+  footer { margin: 4px 0 18px; color: var(--muted); font-size: 13px; }
+  body.recorder .live { display: none; }
+  body:not(.recorder) .recorder { display: none; }
+  @media (max-width: 700px) {
+    h1 { font-size: 18px; }
+    #panels { grid-template-columns: 1fr; }
+    iframe { height: min(662px, 70vh); }
+    #caption { font-size: 15px; align-items: flex-start; }
+    #caption .detail { font-size: 13px; }
+  }
+</style>
+</head>
+<body>
+<h1>TerrainLayer: clicks miss high tiles after a zoom during the first tile load</h1>
+<div class="sub recorder">Both panels get the same real mouse input (Chrome DevTools Protocol). Mount St. Helens, Terrarium elevation tiles, <code>pickable: true</code>, no other layers.</div>
+<div class="sub live">Both panels show the same view and get the same clicks: the page zooms both, and a click, drag or zoom in one
+  panel is repeated in the other. Mount St. Helens, Terrarium elevation tiles loaded fresh on every visit,
+  <code>pickable: true</code>, no other layers.</div>
+<div class="controls live">
+  <button id="restart" type="button">Restart</button>
+  <button id="pick-grid" type="button" disabled>Pick grid</button>
+  <label><input id="early" type="checkbox" checked> Zoom while the first tiles load</label>
+</div>
+<div id="panels">
+  <div class="panel">
+    <div class="name"><i class="badge" style="background: var(--miss)"></i>Before: upstream master<span id="label-master"></span></div>
+    <iframe id="master" title="master"></iframe>
+  </div>
+  <div class="panel">
+    <div class="name"><i class="badge" style="background: var(--hit)"></i>After: master + LayerManager fix<span id="label-fix"></span></div>
+    <iframe id="fix" title="fix"></iframe>
+  </div>
+</div>
+<div id="caption"></div>
+<footer class="live">Builds: <span id="builds">loading build.json</span> ·
+  <a href="https://github.com/mfrnd/deck.gl/tree/demo/terrain-picking/scripts/terrain-picking-repro">Source</a></footer>
+<script>
+// Two panels (panel.html), one per deck.gl build. With ?recorder=1, record.mjs drives the page: it sends the input
+// and sets the captions. Otherwise this page zooms both panels while their first tiles load (?early=0: after they
+// have loaded) and repeats the input of one panel in the other.
+const params = new URLSearchParams(location.search);
+const recorder = params.get('recorder') === '1';
+const early = params.get('early') !== '0';
+const PANELS = ['master', 'fix'];
+// Added to the tile URLs, so that the browser cache does not have the first tiles
+const cacheKey = Math.random().toString(36).slice(2, 10);
+const GRID = {cols: 40, rows: 26, top: 0.04, bottom: 0.98};
+// Three mouse wheel steps (deltaY -100 each) zoom from 11 to 12.64
+const ZOOM_STEPS = [11.547, 12.093, 12.64];
+
+document.body.classList.toggle('recorder', recorder);
+fetch('build.json')
+  .then(response => response.json())
+  .then(info => {
+    for (const name of PANELS) document.getElementById(`label-${name}`).textContent = info.builds[name];
+    document.getElementById('builds').innerHTML = PANELS.map(name => `${name} <code>${info.builds[name]}</code>`).join(', ');
+  });
+for (const name of PANELS) {
+  document.getElementById(name).src = recorder ? `panel.html?build=${name}` : `panel.html?build=${name}&live=1&v=${cacheKey}`;
+}
+window.panel = name => document.getElementById(name).contentWindow.fixture;
+window.setCaption = (step, text, detail = '') => {
+  document.getElementById('caption').innerHTML = step
+    ? `<div class="step">${step}</div><div>${text}${detail ? ` <span class="detail">${detail}</span>` : ''}</div>`
+    : `<div>${text}${detail ? ` <span class="detail">${detail}</span>` : ''}</div>`;
+};
+
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+const until = async test => {
+  while (!test()) await sleep(20);
+};
+const other = name => (name === 'master' ? 'fix' : 'master');
+// State for scripts that check the page
+const live = (window.live = {early, phase: 'loading', atZoom: null});
+
+// Input in one panel is repeated in the other
+window.panelEvent = (name, type, data) => {
+  const target = panel(other(name));
+  if (recorder || live.phase !== 'ready' || !target || !target.ready) return;
+  if (type === 'pointer') {
+    target.ghost(data);
+  } else if (type === 'click') {
+    target.clickAt(data);
+    showResult();
+  } else if (type === 'view') {
+    target.setView(data);
+    // Marks and grids belong to the view they were picked in
+    for (const each of PANELS) panel(each).resetPicks();
+    showResult();
+  }
+};
+
+function summary(name) {
+  const {clicks, grid} = panel(name);
+  const parts = [];
+  if (clicks.length) parts.push(`${clicks.filter(c => c.hit).length} of ${clicks.length} clicks`);
+  if (grid) parts.push(`${Math.round((100 * grid.hits) / grid.total)}% of the grid`);
+  return parts.join(', ');
+}
+function showResult() {
+  if (!summary('master') && !summary('fix')) {
+    setCaption(2, 'Click the mountain in either panel', 'the other panel picks at the same place · Pick grid picks 40 × 26 points in both');
+  } else {
+    setCaption('', `Before: ${summary('master') || '–'} · After: ${summary('fix') || '–'}`,
+      'Drag the map a little and pick again: any later layer update hides the bug');
+  }
+}
+
+async function runLive() {
+  document.body.classList.add('waiting');
+  const pickGrid = document.getElementById('pick-grid');
+  const checkbox = document.getElementById('early');
+  checkbox.checked = early;
+  const restart = () => {
+    location.search = checkbox.checked ? '' : '?early=0';
+  };
+  document.getElementById('restart').addEventListener('click', restart);
+  checkbox.addEventListener('change', restart);
+  pickGrid.addEventListener('click', async () => {
+    pickGrid.disabled = true;
+    await Promise.all(PANELS.map(name => panel(name).pickGrid(GRID)));
+    pickGrid.disabled = false;
+    showResult();
+  });
+
+  const title = early ? 'Zoom in while the first tiles load' : 'Let the first tiles load, then zoom in';
+  setCaption(1, title, early ? 'this page zooms both panels as soon as they request their first tiles' : 'the same zoom as with the box checked, only later');
+  await until(() => PANELS.every(name => panel(name) && panel(name).ready));
+  if (early) {
+    await until(() => PANELS.every(name => panel(name).status().selected > 0));
+  } else {
+    await until(() => PANELS.every(name => panel(name).status().isLoaded));
+    await sleep(500);
+  }
+  live.atZoom = Object.fromEntries(PANELS.map(name => [name, panel(name).status()]));
+  const start = panel('master').view();
+  for (const [i, zoom] of ZOOM_STEPS.entries()) {
+    if (i) await sleep(70);
+    for (const name of PANELS) panel(name).setView({...start, zoom});
+  }
+  for (const name of PANELS) {
+    const {selected, loaded} = live.atZoom[name];
+    panel(name).log(`scripted zoom ×3 → zoom ${ZOOM_STEPS[2]}, tiles loaded ${loaded} of ${selected}`);
+  }
+  setCaption(1, title, 'then wait until every tile has loaded');
+
+  // Settled: every tile loaded and nothing logged for 1.5 s
+  let last = null;
+  let since = performance.now();
+  const startedAt = performance.now();
+  while (performance.now() - startedAt < 40000) {
+    const key = JSON.stringify(PANELS.map(name => [panel(name).status().isLoaded, panel(name).events.length]));
+    if (key !== last) {
+      last = key;
+      since = performance.now();
+    } else if (PANELS.every(name => panel(name).status().isLoaded) && performance.now() - since > 1500) {
+      break;
+    }
+    await sleep(100);
+  }
+  live.phase = 'ready';
+  document.body.classList.remove('waiting');
+  pickGrid.disabled = false;
+  showResult();
+}
+if (!recorder) runLive();
+</script>
+</body>
+</html>
