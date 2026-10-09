@@ -3,7 +3,7 @@
 export const BUILDS = {
   master: 'deck.gl master',
   pr1: 'cartesian z fix (fix/7064-cartesian-z-scale)',
-  pr2: 'globe camera fix (fix/7064-maplibre-globe-camera-elevation)',
+  pr2: 'globe camera fix, core and MapLibre/Mapbox parts (074e492c)',
   sincos: 'master + globe sin/cos patch'
 };
 
