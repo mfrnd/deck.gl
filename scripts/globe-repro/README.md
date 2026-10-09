@@ -33,7 +33,8 @@ Builds are fixed commits, listed in `build.mjs` and in the site's `build.json`:
 
 - master: `d1b0ae43`
 - cartesian z fix: `0e141bb1` (branch `fix/7064-cartesian-z-scale`)
-- camera fix: `074e492c` (branch `fix/7064-maplibre-globe-camera-elevation`)
+- camera fix: `074e492c`, both parts before the split: the core change is now on branch
+  `fix/7064-maplibre-globe-camera-elevation`, the MapLibre/Mapbox blend on `fix/7064-maplibre-globe-terrain-blend`
 - sin/cos: master + `patches/globe-sincos.patch` (`project_globe_` computes sin/cos with a polynomial)
 
 Judge the first three on a GPU. Under software rendering (SwiftShader, as in headless browsers and
